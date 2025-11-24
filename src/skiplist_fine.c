@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <limits.h>
 
-// Create skip list with fine-grained locking
+// True fine-grained skip list with hand-over-hand locking
 SkipList* skiplist_create_fine(void) {
     SkipList* list = (SkipList*)malloc(sizeof(SkipList));
     if (!list) {
@@ -24,221 +24,225 @@ SkipList* skiplist_create_fine(void) {
     return list;
 }
 
-// Helper to lock unique predecessors only (avoid double-locking same node)
-static void lock_predecessors(Node* preds[], int topLevel) {
-    // Lock unique nodes only, in order from lowest index
-    for (int i = 0; i <= topLevel; i++) {
-        // Check if this node was already locked
-        bool already_locked = false;
-        for (int j = 0; j < i; j++) {
-            if (preds[j] == preds[i]) {
-                already_locked = true;
+// Lock a node set, avoiding duplicates
+static void lock_node_set(Node** nodes, int count) {
+    // First, collect unique nodes
+    Node* unique[MAX_LEVEL + 1];
+    int unique_count = 0;
+    
+    for (int i = 0; i < count; i++) {
+        bool is_unique = true;
+        for (int j = 0; j < unique_count; j++) {
+            if (unique[j] == nodes[i]) {
+                is_unique = false;
                 break;
             }
         }
-        if (!already_locked) {
-            omp_set_lock(&preds[i]->lock);
+        if (is_unique) {
+            unique[unique_count++] = nodes[i];
         }
+    }
+    
+    // Sort by address to avoid deadlock (consistent lock ordering)
+    for (int i = 0; i < unique_count - 1; i++) {
+        for (int j = i + 1; j < unique_count; j++) {
+            if ((uintptr_t)unique[i] > (uintptr_t)unique[j]) {
+                Node* temp = unique[i];
+                unique[i] = unique[j];
+                unique[j] = temp;
+            }
+        }
+    }
+    
+    // Lock in order
+    for (int i = 0; i < unique_count; i++) {
+        omp_set_lock(&unique[i]->lock);
     }
 }
 
-// Helper to unlock unique predecessors
-static void unlock_predecessors(Node* preds[], int topLevel) {
-    // Unlock in reverse order, unique nodes only
-    for (int i = topLevel; i >= 0; i--) {
-        // Check if this node needs to be unlocked
-        bool already_unlocked = false;
-        for (int j = i + 1; j <= topLevel; j++) {
-            if (preds[j] == preds[i]) {
-                already_unlocked = true;
+// Unlock a node set, avoiding duplicates
+static void unlock_node_set(Node** nodes, int count) {
+    // Collect unique nodes
+    Node* unique[MAX_LEVEL + 1];
+    int unique_count = 0;
+    
+    for (int i = 0; i < count; i++) {
+        bool is_unique = true;
+        for (int j = 0; j < unique_count; j++) {
+            if (unique[j] == nodes[i]) {
+                is_unique = false;
                 break;
             }
         }
-        if (!already_unlocked) {
-            omp_unset_lock(&preds[i]->lock);
+        if (is_unique) {
+            unique[unique_count++] = nodes[i];
         }
+    }
+    
+    // Unlock all unique nodes
+    for (int i = 0; i < unique_count; i++) {
+        omp_unset_lock(&unique[i]->lock);
     }
 }
 
-// Insert with fine-grained locking and optimistic validation
+// True fine-grained insert with optimistic + locking phases
 bool skiplist_insert_fine(SkipList* list, int key, int value) {
     Node* preds[MAX_LEVEL + 1];
     Node* succs[MAX_LEVEL + 1];
     
-    int retry_count = 0;
-    const int MAX_RETRIES = 100;
-    
-    while (retry_count < MAX_RETRIES) {
-        retry_count++;
-        
-        // Phase 1: Optimistic search (no locks held)
-        Node* curr = list->head;
+    while (true) {
+        // Phase 1: Optimistic traversal (no locks)
+        Node* pred = list->head;
         
         for (int level = list->maxLevel; level >= 0; level--) {
-            Node* next = atomic_load(&curr->next[level]);
-            while (next != list->tail && next->key < key) {
-                curr = next;
-                next = atomic_load(&curr->next[level]);
+            Node* curr = atomic_load(&pred->next[level]);
+            
+            while (curr != list->tail && curr->key < key) {
+                pred = curr;
+                curr = atomic_load(&pred->next[level]);
             }
-            preds[level] = curr;
-            succs[level] = next;
+            
+            preds[level] = pred;
+            succs[level] = curr;
         }
         
-        // Check if key already exists
+        // Check if key exists
         if (succs[0] != list->tail && succs[0]->key == key) {
             return false;
         }
         
         // Phase 2: Create new node
-        int newLevel = random_level();
-        Node* newNode = create_node(key, value, newLevel);
+        int topLevel = random_level();
+        Node* newNode = create_node(key, value, topLevel);
         
-        // Phase 3: Lock predecessors
-        lock_predecessors(preds, newLevel);
+        // Phase 3: Lock all predecessors (using proper lock ordering)
+        lock_node_set(preds, topLevel + 1);
         
-        // Phase 4: Validate that nothing changed
+        // Phase 4: Validate - make sure nothing changed
         bool valid = true;
-        for (int i = 0; i <= newLevel; i++) {
-            Node* current_next = atomic_load(&preds[i]->next[i]);
-            if (current_next != succs[i]) {
+        for (int level = 0; level <= topLevel; level++) {
+            Node* curr = atomic_load(&preds[level]->next[level]);
+            if (curr != succs[level]) {
                 valid = false;
                 break;
             }
-            // Also check that successor is still valid
-            if (succs[i] != list->tail && succs[i]->key == key) {
+            // Double-check key doesn't exist now
+            if (curr != list->tail && curr->key == key) {
                 valid = false;
                 break;
             }
         }
         
-        if (valid) {
-            // Phase 5: Link new node at all levels
-            for (int i = 0; i <= newLevel; i++) {
-                atomic_store(&newNode->next[i], succs[i]);
-                atomic_store(&preds[i]->next[i], newNode);
-            }
-            
-            unlock_predecessors(preds, newLevel);
-            atomic_fetch_add(&list->size, 1);
-            return true;
-        } else {
-            // Validation failed, cleanup and retry
-            unlock_predecessors(preds, newLevel);
+        if (!valid) {
+            // Validation failed, unlock and retry
+            unlock_node_set(preds, topLevel + 1);
             omp_destroy_lock(&newNode->lock);
             free(newNode);
-            // Continue to retry
+            continue;
         }
+        
+        // Phase 5: Insert (we have locks and validation passed)
+        for (int level = 0; level <= topLevel; level++) {
+            atomic_store(&newNode->next[level], succs[level]);
+            atomic_store(&preds[level]->next[level], newNode);
+        }
+        
+        // Phase 6: Unlock and return
+        unlock_node_set(preds, topLevel + 1);
+        atomic_fetch_add(&list->size, 1);
+        return true;
     }
-    
-    // Too many retries - this shouldn't happen in practice
-    fprintf(stderr, "Warning: Insert exceeded retry limit\n");
-    return false;
 }
 
-// Delete with fine-grained locking and optimistic validation
+// True fine-grained delete
 bool skiplist_delete_fine(SkipList* list, int key) {
     Node* preds[MAX_LEVEL + 1];
     Node* victim = NULL;
+    Node* lock_nodes[MAX_LEVEL + 2];  // preds + victim
     
-    int retry_count = 0;
-    const int MAX_RETRIES = 1000;  // Increased for high contention
-    
-    while (retry_count < MAX_RETRIES) {
-        retry_count++;
-        
+    while (true) {
         // Phase 1: Optimistic search
-        Node* curr = list->head;
+        Node* pred = list->head;
         
         for (int level = list->maxLevel; level >= 0; level--) {
-            Node* next = atomic_load(&curr->next[level]);
-            while (next != list->tail && next->key < key) {
-                curr = next;
-                next = atomic_load(&curr->next[level]);
+            Node* curr = atomic_load(&pred->next[level]);
+            
+            while (curr != list->tail && curr->key < key) {
+                pred = curr;
+                curr = atomic_load(&pred->next[level]);
             }
-            preds[level] = curr;
+            
+            preds[level] = pred;
             
             if (level == 0) {
-                if (next != list->tail && next->key == key) {
-                    victim = next;
+                if (curr != list->tail && curr->key == key) {
+                    victim = curr;
                 } else {
-                    return false;  // Key not found
+                    return false; // Not found
                 }
             }
         }
         
-        // Phase 2: Lock victim first, then predecessors
-        // Try to lock victim with timeout-like behavior
-        if (!omp_test_lock(&victim->lock)) {
-            // Someone else has victim locked, retry quickly
-            continue;
-        }
-        
-        lock_predecessors(preds, victim->topLevel);
-        
-        // Phase 3: Validate
-        bool valid = true;
+        // Phase 2: Build lock set (victim + all preds)
         for (int i = 0; i <= victim->topLevel; i++) {
-            Node* current_next = atomic_load(&preds[i]->next[i]);
-            if (current_next != victim) {
+            lock_nodes[i] = preds[i];
+        }
+        lock_nodes[victim->topLevel + 1] = victim;
+        
+        // Phase 3: Lock all (with proper ordering)
+        lock_node_set(lock_nodes, victim->topLevel + 2);
+        
+        // Phase 4: Validate
+        bool valid = true;
+        for (int level = 0; level <= victim->topLevel; level++) {
+            if (atomic_load(&preds[level]->next[level]) != victim) {
                 valid = false;
                 break;
             }
         }
         
-        if (valid) {
-            // Phase 4: Unlink victim from all levels
-            for (int i = 0; i <= victim->topLevel; i++) {
-                Node* succ = atomic_load(&victim->next[i]);
-                atomic_store(&preds[i]->next[i], succ);
-            }
-            
-            unlock_predecessors(preds, victim->topLevel);
-            omp_unset_lock(&victim->lock);
-            
-            atomic_fetch_sub(&list->size, 1);
-            
-            // Free victim
-            omp_destroy_lock(&victim->lock);
-            free(victim);
-            return true;
-        } else {
-            // Validation failed, unlock and retry
-            unlock_predecessors(preds, victim->topLevel);
-            omp_unset_lock(&victim->lock);
-            
-            // Small backoff before retry
-            if (retry_count % 10 == 0) {
-                // Every 10 retries, yield to other threads
-                #pragma omp taskyield
-            }
+        if (!valid) {
+            unlock_node_set(lock_nodes, victim->topLevel + 2);
+            continue;
         }
+        
+        // Phase 5: Unlink victim
+        for (int level = 0; level <= victim->topLevel; level++) {
+            Node* succ = atomic_load(&victim->next[level]);
+            atomic_store(&preds[level]->next[level], succ);
+        }
+        
+        // Phase 6: Unlock and cleanup
+        unlock_node_set(lock_nodes, victim->topLevel + 2);
+        atomic_fetch_sub(&list->size, 1);
+        
+        omp_destroy_lock(&victim->lock);
+        free(victim);
+        return true;
     }
-    
-    // Exceeded retry limit - fall back to simple approach
-    // This shouldn't happen often, but ensures progress
-    return false;
 }
 
-// Contains with optimistic reading (lock-free for reads)
+// Lock-free contains (read-only, no locks needed)
 bool skiplist_contains_fine(SkipList* list, int key) {
-    Node* curr = list->head;
+    Node* pred = list->head;
     
     for (int level = list->maxLevel; level >= 0; level--) {
-        Node* next = atomic_load(&curr->next[level]);
-        while (next != list->tail && next->key < key) {
-            curr = next;
-            next = atomic_load(&curr->next[level]);
+        Node* curr = atomic_load(&pred->next[level]);
+        
+        while (curr != list->tail && curr->key < key) {
+            pred = curr;
+            curr = atomic_load(&pred->next[level]);
         }
         
         if (level == 0) {
-            return (next != list->tail && next->key == key);
+            return (curr != list->tail && curr->key == key);
         }
     }
     
     return false;
 }
 
-// Destroy skip list
+// Destroy
 void skiplist_destroy_fine(SkipList* list) {
     Node* curr = list->head;
     
