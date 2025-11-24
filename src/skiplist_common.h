@@ -17,6 +17,7 @@ typedef struct Node {
     int value;
     int topLevel;
     _Atomic(bool) marked;  // For logical deletion in lock-free version
+    _Atomic(bool) fully_linked;  // True when all levels are linked
     _Atomic(struct Node*) next[MAX_LEVEL + 1];
     omp_lock_t lock;  // For fine-grained locking version
 } Node;

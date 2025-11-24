@@ -143,6 +143,9 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
             }
         }
         
+        // Mark as fully linked after ALL levels are done
+        atomic_store(&newNode->fully_linked, true);
+        
         atomic_fetch_add(&list->size, 1);
         return true;
     }

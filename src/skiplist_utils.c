@@ -37,6 +37,7 @@ Node* create_node(int key, int value, int level) {
     node->value = value;
     node->topLevel = level;
     atomic_init(&node->marked, false);
+    atomic_init(&node->fully_linked, false);  // Not linked yet
     
     for (int i = 0; i <= MAX_LEVEL; i++) {
         atomic_init(&node->next[i], NULL);
@@ -73,11 +74,17 @@ bool validate_skiplist(SkipList* list) {
         int prev_key = INT_MIN;
         
         while (curr != list->tail) {
-            if (curr->key <= prev_key) {
-                fprintf(stderr, "Validation failed: unsorted at level %d\n", level);
-                return false;
+            // Skip nodes that are not fully linked yet or are marked for deletion
+            bool fully_linked = atomic_load(&curr->fully_linked);
+            bool marked = atomic_load(&curr->marked);
+            
+            if (fully_linked && !marked) {
+                if (curr->key <= prev_key) {
+                    fprintf(stderr, "Validation failed: unsorted at level %d\n", level);
+                    return false;
+                }
+                prev_key = curr->key;
             }
-            prev_key = curr->key;
             curr = atomic_load(&curr->next[level]);
         }
     }

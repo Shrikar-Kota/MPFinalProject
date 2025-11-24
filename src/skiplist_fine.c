@@ -145,6 +145,9 @@ bool skiplist_insert_fine(SkipList* list, int key, int value) {
             atomic_store(&preds[level]->next[level], newNode);
         }
         
+        // Mark as fully linked NOW
+        atomic_store(&newNode->fully_linked, true);
+        
         // Phase 6: Unlock and return success
         unlock_nodes_ordered(locked, locked_count);
         atomic_fetch_add(&list->size, 1);
