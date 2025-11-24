@@ -1,6 +1,7 @@
 # Compiler and flags
 CC = gcc
-CFLAGS = -Wall -Wextra -O3 -fopenmp -march=native
+# -march=native is required for _mm_pause() and atomic optimizations
+CFLAGS = -Wall -Wextra -O3 -fopenmp -march=native -pthread
 LDFLAGS = -fopenmp -lm
 DEBUG_FLAGS = -g -O0 -DDEBUG
 SANITIZE_FLAGS = -fsanitize=thread -g
@@ -11,7 +12,7 @@ TEST_DIR = tests
 BUILD_DIR = build
 BIN_DIR = bin
 
-# Source files
+# Source files (excluding the main executable files)
 SOURCES = $(SRC_DIR)/skiplist_utils.c \
           $(SRC_DIR)/skiplist_coarse.c \
           $(SRC_DIR)/skiplist_fine.c \
@@ -25,24 +26,24 @@ BENCHMARK = $(BIN_DIR)/benchmark
 CORRECTNESS_TEST = $(BIN_DIR)/correctness_test
 
 # Targets
-.PHONY: all clean debug test benchmark dirs sanitize
+.PHONY: all clean debug test benchmark dirs sanitize help
 
 all: dirs $(BENCHMARK) $(CORRECTNESS_TEST)
 
 dirs:
 	@mkdir -p $(BUILD_DIR) $(BIN_DIR)
 
-# Build benchmark
+# Build benchmark executable
 $(BENCHMARK): $(OBJECTS) $(BUILD_DIR)/benchmark.o
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 	@echo "Built benchmark executable: $(BENCHMARK)"
 
-# Build correctness tests
+# Build correctness test executable
 $(CORRECTNESS_TEST): $(OBJECTS) $(BUILD_DIR)/correctness_test.o
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 	@echo "Built correctness test executable: $(CORRECTNESS_TEST)"
 
-# Compile source files
+# Compile source files (including benchmark.c if it's in src)
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(SRC_DIR)/skiplist_common.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -54,7 +55,7 @@ $(BUILD_DIR)/%.o: $(TEST_DIR)/%.c $(SRC_DIR)/skiplist_common.h
 debug: CFLAGS += $(DEBUG_FLAGS)
 debug: clean all
 
-# Thread sanitizer build (for detecting race conditions)
+# Thread sanitizer build (critical for verifying lock-free logic)
 sanitize: CFLAGS += $(SANITIZE_FLAGS)
 sanitize: LDFLAGS += $(SANITIZE_FLAGS)
 sanitize: clean all
@@ -68,13 +69,8 @@ test: $(CORRECTNESS_TEST)
 
 # Run benchmark with default parameters
 benchmark: $(BENCHMARK)
-	@echo "Running benchmark (lockfree, 4 threads, mixed workload)..."
-	@./$(BENCHMARK)
-
-# Run comprehensive benchmarks
-benchmark-all: $(BENCHMARK)
-	@echo "Running comprehensive benchmarks..."
-	@./scripts/run_experiments.sh
+	@echo "Running benchmark (lockfree, 8 threads, mixed workload)..."
+	@./$(BENCHMARK) --impl lockfree --threads 8 --workload mixed
 
 # Clean build artifacts
 clean:
@@ -88,13 +84,5 @@ help:
 	@echo "  benchmark     - Build and run basic benchmark"
 	@echo "  test          - Build and run correctness tests"
 	@echo "  debug         - Build with debug symbols"
-	@echo "  sanitize      - Build with Thread Sanitizer"
-	@echo "  benchmark-all - Run comprehensive benchmarks"
+	@echo "  sanitize      - Build with Thread Sanitizer (detects races)"
 	@echo "  clean         - Remove build artifacts"
-	@echo "  help          - Show this help message"
-	@echo ""
-	@echo "Example usage:"
-	@echo "  make                    # Build everything"
-	@echo "  make test               # Run correctness tests"
-	@echo "  make benchmark          # Run basic benchmark"
-	@echo "  make sanitize && make test  # Test with race detection"
