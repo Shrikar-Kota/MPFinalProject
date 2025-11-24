@@ -24,26 +24,54 @@ SkipList* skiplist_create_fine(void) {
     return list;
 }
 
-// Helper to lock predecessors
+// Helper to lock unique predecessors only (avoid double-locking same node)
 static void lock_predecessors(Node* preds[], int topLevel) {
+    // Lock unique nodes only, in order from lowest index
     for (int i = 0; i <= topLevel; i++) {
-        omp_set_lock(&preds[i]->lock);
+        // Check if this node was already locked
+        bool already_locked = false;
+        for (int j = 0; j < i; j++) {
+            if (preds[j] == preds[i]) {
+                already_locked = true;
+                break;
+            }
+        }
+        if (!already_locked) {
+            omp_set_lock(&preds[i]->lock);
+        }
     }
 }
 
-// Helper to unlock predecessors
+// Helper to unlock unique predecessors
 static void unlock_predecessors(Node* preds[], int topLevel) {
-    for (int i = 0; i <= topLevel; i++) {
-        omp_unset_lock(&preds[i]->lock);
+    // Unlock in reverse order, unique nodes only
+    for (int i = topLevel; i >= 0; i--) {
+        // Check if this node needs to be unlocked
+        bool already_unlocked = false;
+        for (int j = i + 1; j <= topLevel; j++) {
+            if (preds[j] == preds[i]) {
+                already_unlocked = true;
+                break;
+            }
+        }
+        if (!already_unlocked) {
+            omp_unset_lock(&preds[i]->lock);
+        }
     }
 }
 
-// Insert with fine-grained locking
+// Insert with fine-grained locking and optimistic validation
 bool skiplist_insert_fine(SkipList* list, int key, int value) {
     Node* preds[MAX_LEVEL + 1];
     Node* succs[MAX_LEVEL + 1];
     
-    while (true) {
+    int retry_count = 0;
+    const int MAX_RETRIES = 100;
+    
+    while (retry_count < MAX_RETRIES) {
+        retry_count++;
+        
+        // Phase 1: Optimistic search (no locks held)
         Node* curr = list->head;
         
         for (int level = list->maxLevel; level >= 0; level--) {
@@ -56,25 +84,35 @@ bool skiplist_insert_fine(SkipList* list, int key, int value) {
             succs[level] = next;
         }
         
+        // Check if key already exists
         if (succs[0] != list->tail && succs[0]->key == key) {
             return false;
         }
         
+        // Phase 2: Create new node
         int newLevel = random_level();
         Node* newNode = create_node(key, value, newLevel);
         
+        // Phase 3: Lock predecessors
         lock_predecessors(preds, newLevel);
         
+        // Phase 4: Validate that nothing changed
         bool valid = true;
         for (int i = 0; i <= newLevel; i++) {
-            Node* succ = atomic_load(&preds[i]->next[i]);
-            if (succ != succs[i]) {
+            Node* current_next = atomic_load(&preds[i]->next[i]);
+            if (current_next != succs[i]) {
+                valid = false;
+                break;
+            }
+            // Also check that successor is still valid
+            if (succs[i] != list->tail && succs[i]->key == key) {
                 valid = false;
                 break;
             }
         }
         
         if (valid) {
+            // Phase 5: Link new node at all levels
             for (int i = 0; i <= newLevel; i++) {
                 atomic_store(&newNode->next[i], succs[i]);
                 atomic_store(&preds[i]->next[i], newNode);
@@ -84,19 +122,31 @@ bool skiplist_insert_fine(SkipList* list, int key, int value) {
             atomic_fetch_add(&list->size, 1);
             return true;
         } else {
+            // Validation failed, cleanup and retry
             unlock_predecessors(preds, newLevel);
             omp_destroy_lock(&newNode->lock);
             free(newNode);
+            // Continue to retry
         }
     }
+    
+    // Too many retries - this shouldn't happen in practice
+    fprintf(stderr, "Warning: Insert exceeded retry limit\n");
+    return false;
 }
 
-// Delete with fine-grained locking
+// Delete with fine-grained locking and optimistic validation
 bool skiplist_delete_fine(SkipList* list, int key) {
     Node* preds[MAX_LEVEL + 1];
     Node* victim = NULL;
     
-    while (true) {
+    int retry_count = 0;
+    const int MAX_RETRIES = 100;
+    
+    while (retry_count < MAX_RETRIES) {
+        retry_count++;
+        
+        // Phase 1: Optimistic search
         Node* curr = list->head;
         
         for (int level = list->maxLevel; level >= 0; level--) {
@@ -111,23 +161,27 @@ bool skiplist_delete_fine(SkipList* list, int key) {
                 if (next != list->tail && next->key == key) {
                     victim = next;
                 } else {
-                    return false;
+                    return false;  // Key not found
                 }
             }
         }
         
+        // Phase 2: Lock victim first, then predecessors
         omp_set_lock(&victim->lock);
         lock_predecessors(preds, victim->topLevel);
         
+        // Phase 3: Validate
         bool valid = true;
         for (int i = 0; i <= victim->topLevel; i++) {
-            if (atomic_load(&preds[i]->next[i]) != victim) {
+            Node* current_next = atomic_load(&preds[i]->next[i]);
+            if (current_next != victim) {
                 valid = false;
                 break;
             }
         }
         
         if (valid) {
+            // Phase 4: Unlink victim from all levels
             for (int i = 0; i <= victim->topLevel; i++) {
                 Node* succ = atomic_load(&victim->next[i]);
                 atomic_store(&preds[i]->next[i], succ);
@@ -138,17 +192,23 @@ bool skiplist_delete_fine(SkipList* list, int key) {
             
             atomic_fetch_sub(&list->size, 1);
             
+            // Free victim
             omp_destroy_lock(&victim->lock);
             free(victim);
             return true;
         } else {
+            // Validation failed, unlock and retry
             unlock_predecessors(preds, victim->topLevel);
             omp_unset_lock(&victim->lock);
+            // Continue to retry
         }
     }
+    
+    fprintf(stderr, "Warning: Delete exceeded retry limit\n");
+    return false;
 }
 
-// Contains with fine-grained locking (lock-free for reads)
+// Contains with optimistic reading (lock-free for reads)
 bool skiplist_contains_fine(SkipList* list, int key) {
     Node* curr = list->head;
     
