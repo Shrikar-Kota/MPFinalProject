@@ -24,30 +24,20 @@ SkipList* skiplist_create_lockfree(void) {
     return list;
 }
 
-// Helper function to search and build predecessor/successor arrays
+// Helper function to search
 static Node* search(SkipList* list, int key, Node* preds[], Node* succs[]) {
     Node* pred = list->head;
     
     for (int level = list->maxLevel; level >= 0; level--) {
         Node* curr = atomic_load(&pred->next[level]);
         
-        while (curr != list->tail) {
-            Node* succ = atomic_load(&curr->next[level]);
+        while (curr != list->tail && curr->key < key) {
+            // Check if marked
             bool marked = atomic_load(&curr->marked);
-            
-            if (marked) {
-                // Help remove marked node
-                atomic_compare_exchange_strong(&pred->next[level], &curr, succ);
-                curr = atomic_load(&pred->next[level]);
-                continue;
+            if (!marked) {
+                pred = curr;
             }
-            
-            if (curr->key >= key) {
-                break;
-            }
-            
-            pred = curr;
-            curr = succ;
+            curr = atomic_load(&curr->next[level]);
         }
         
         preds[level] = pred;
@@ -57,7 +47,7 @@ static Node* search(SkipList* list, int key, Node* preds[], Node* succs[]) {
     return succs[0];
 }
 
-// Lock-free insert using CAS
+// Lock-free insert
 bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
     Node* preds[MAX_LEVEL + 1];
     Node* succs[MAX_LEVEL + 1];
@@ -65,6 +55,7 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
     while (true) {
         Node* found = search(list, key, preds, succs);
         
+        // Key exists and not marked
         if (found != list->tail && found->key == key) {
             bool marked = atomic_load(&found->marked);
             if (!marked) {
@@ -72,22 +63,27 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
             }
         }
         
+        // Create new node
         int newLevel = random_level();
         Node* newNode = create_node(key, value, newLevel);
         
+        // Link pointers
         for (int level = 0; level <= newLevel; level++) {
             atomic_store(&newNode->next[level], succs[level]);
         }
         
+        // Try CAS at bottom level
         Node* pred = preds[0];
         Node* succ = succs[0];
         
         if (!atomic_compare_exchange_strong(&pred->next[0], &succ, newNode)) {
+            // CAS failed, free and retry
             omp_destroy_lock(&newNode->lock);
             free(newNode);
             continue;
         }
         
+        // Bottom level successful, link upper levels
         for (int level = 1; level <= newLevel; level++) {
             while (true) {
                 pred = preds[level];
@@ -97,7 +93,22 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
                     break;
                 }
                 
-                search(list, key, preds, succs);
+                // Failed, search again for this level only
+                Node* p = list->head;
+                for (int l = list->maxLevel; l >= level; l--) {
+                    Node* curr = atomic_load(&p->next[l]);
+                    while (curr != list->tail && curr->key < key) {
+                        bool marked = atomic_load(&curr->marked);
+                        if (!marked) {
+                            p = curr;
+                        }
+                        curr = atomic_load(&curr->next[l]);
+                    }
+                    if (l == level) {
+                        preds[level] = p;
+                        succs[level] = curr;
+                    }
+                }
             }
         }
         
@@ -106,7 +117,7 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
     }
 }
 
-// Lock-free delete using logical deletion
+// Lock-free delete with logical deletion only (no physical removal)
 bool skiplist_delete_lockfree(SkipList* list, int key) {
     Node* preds[MAX_LEVEL + 1];
     Node* succs[MAX_LEVEL + 1];
@@ -114,44 +125,29 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
     while (true) {
         Node* victim = search(list, key, preds, succs);
         
+        // Not found
         if (victim == list->tail || victim->key != key) {
             return false;
         }
         
+        // Already marked
         bool marked = atomic_load(&victim->marked);
         if (marked) {
             return false;
         }
         
+        // Try to mark it
         bool expected = false;
-        if (!atomic_compare_exchange_strong(&victim->marked, &expected, true)) {
-            continue;
+        if (atomic_compare_exchange_strong(&victim->marked, &expected, true)) {
+            atomic_fetch_sub(&list->size, 1);
+            // Note: We don't free the node to avoid use-after-free
+            // In production, use hazard pointers or epoch-based reclamation
+            return true;
         }
-        
-        for (int level = victim->topLevel; level >= 0; level--) {
-            Node* succ = atomic_load(&victim->next[level]);
-            
-            while (true) {
-                Node* pred = preds[level];
-                Node* predNext = atomic_load(&pred->next[level]);
-                
-                if (predNext == victim) {
-                    if (atomic_compare_exchange_strong(&pred->next[level], &victim, succ)) {
-                        break;
-                    }
-                }
-                
-                search(list, key, preds, succs);
-                break;
-            }
-        }
-        
-        atomic_fetch_sub(&list->size, 1);
-        return true;
     }
 }
 
-// Lock-free contains (wait-free operation)
+// Lock-free contains
 bool skiplist_contains_lockfree(SkipList* list, int key) {
     Node* curr = list->head;
     
@@ -175,7 +171,7 @@ bool skiplist_contains_lockfree(SkipList* list, int key) {
     return false;
 }
 
-// Destroy lock-free skip list
+// Destroy (safe because no concurrent access during destroy)
 void skiplist_destroy_lockfree(SkipList* list) {
     Node* curr = list->head;
     
