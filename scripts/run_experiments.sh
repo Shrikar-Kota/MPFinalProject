@@ -1,6 +1,3 @@
-cd ~/MPFinalProject
-
-cat > scripts/run_experiments_final.sh << 'EOF'
 #!/bin/bash
 OUTPUT_DIR="results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -106,13 +103,7 @@ echo "========================================="
 echo "Completed at: $(date)"
 echo "Results: ${RESULTS_FILE}"
 echo "Total results: $(( $(wc -l < ${RESULTS_FILE}) - 1 ))"
-EOF
-
-chmod +x scripts/run_experiments_final.sh
-
-# Run it in tmux
-tmux new -s benchmark
-./scripts/run_experiments_final.sh
-
-# Detach: Ctrl+B then D
-# Reattach: tmux attach -t benchmark
+echo ""
+echo "To analyze results:"
+echo "  python3 scripts/plot_results.py ${RESULTS_FILE}"
+echo ""
