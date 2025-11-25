@@ -26,7 +26,7 @@ SkipList* skiplist_create_lockfree(void) {
 }
 
 bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
-    for (int retry = 0; retry < 1000; retry++) {
+    for (int retry = 0; retry < 100; retry++) {  // Reduced from 1000
         // Find position at level 0
         Node* pred = list->head;
         Node* curr = atomic_load(&pred->next[0]);
@@ -80,12 +80,13 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
         omp_destroy_lock(&newNode->lock);
         free(newNode);
         
-        // Small backoff
-        if (retry % 10 == 0 && retry > 0) {
-            #pragma omp taskyield
+        // Backoff to reduce contention
+        if (retry % 5 == 0 && retry > 0) {
+            for (volatile int i = 0; i < retry; i++);  // Spin
         }
     }
     
+    // Max retries exceeded - should rarely happen
     return false;
 }
 
