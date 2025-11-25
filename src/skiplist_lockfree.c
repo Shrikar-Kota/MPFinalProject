@@ -27,24 +27,25 @@ SkipList* skiplist_create_lockfree(void) {
 
 bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
     for (int retry = 0; retry < 1000; retry++) {
-        // Find position at level 0 only - simple and correct
+        // Find position at level 0
         Node* pred = list->head;
         Node* curr = atomic_load(&pred->next[0]);
         
-        while (curr != list->tail) {
+        while (curr != list->tail && curr->key < key) {
             bool marked = atomic_load(&curr->marked);
-            if (!marked && curr->key >= key) {
-                break;
-            }
-            if (!marked && curr->key < key) {
+            if (!marked) {
                 pred = curr;
             }
             curr = atomic_load(&curr->next[0]);
         }
         
         // Check if key exists
-        if (curr != list->tail && curr->key == key && !atomic_load(&curr->marked)) {
-            return false;
+        if (curr != list->tail && curr->key == key) {
+            bool marked = atomic_load(&curr->marked);
+            if (!marked) {
+                return false;  // Already exists
+            }
+            // If marked, continue to insert
         }
         
         // Create new node
@@ -53,18 +54,16 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
         atomic_store(&newNode->next[0], curr);
         atomic_store(&newNode->fully_linked, true);
         
-        // CAS at level 0 - this is the linearization point
-        if (atomic_compare_exchange_strong(&pred->next[0], &curr, newNode)) {
-            // Success! Link upper levels (best effort)
+        // CAS at level 0
+        Node* expected = curr;
+        if (atomic_compare_exchange_strong(&pred->next[0], &expected, newNode)) {
+            // Success! Link upper levels
             for (int level = 1; level <= topLevel; level++) {
                 Node* lpred = list->head;
                 Node* lcurr = atomic_load(&lpred->next[level]);
                 
                 while (lcurr != list->tail && lcurr->key < key) {
-                    bool marked = atomic_load(&lcurr->marked);
-                    if (!marked) {
-                        lpred = lcurr;
-                    }
+                    lpred = lcurr;
                     lcurr = atomic_load(&lpred->next[level]);
                 }
                 
@@ -80,12 +79,18 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
         // CAS failed, cleanup and retry
         omp_destroy_lock(&newNode->lock);
         free(newNode);
+        
+        // Small backoff
+        if (retry % 10 == 0 && retry > 0) {
+            #pragma omp taskyield
+        }
     }
     
     return false;
 }
 
 bool skiplist_delete_lockfree(SkipList* list, int key) {
+    // Simple linear search at level 0
     Node* curr = atomic_load(&list->head->next[0]);
     
     while (curr != list->tail) {
@@ -95,7 +100,10 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
                 atomic_fetch_sub(&list->size, 1);
                 return true;
             }
-            return false;
+            return false;  // Someone else deleted it
+        }
+        if (curr->key > key) {
+            return false;  // Not found
         }
         curr = atomic_load(&curr->next[0]);
     }
