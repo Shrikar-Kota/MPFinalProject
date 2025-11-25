@@ -86,6 +86,10 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
             continue;
         }
         
+        // IMMEDIATELY mark as fully linked after level 0 succeeds
+        // This makes the node visible to contains()
+        atomic_store(&newNode->fully_linked, true);
+        
         // Success at level 0, link upper levels (best effort)
         for (int level = 1; level <= topLevel; level++) {
             for (int attempt = 0; attempt < 5; attempt++) {
@@ -97,8 +101,6 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
             }
         }
         
-        // Mark as fully linked
-        atomic_store(&newNode->fully_linked, true);
         atomic_fetch_add(&list->size, 1);
         return true;
     }
