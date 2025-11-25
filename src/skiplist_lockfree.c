@@ -154,7 +154,7 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
     return false;
 }
 
-// Contains - skip marked nodes
+// Contains - only check if marked, don't skip based on it
 bool skiplist_contains_lockfree(SkipList* list, int key) {
     Node* pred = list->head;
     
@@ -162,19 +162,16 @@ bool skiplist_contains_lockfree(SkipList* list, int key) {
         Node* curr = atomic_load(&pred->next[level]);
         
         while (curr != NULL && curr != list->tail) {
-            bool marked = atomic_load(&curr->marked);
-            
-            if (!marked && curr->key >= key) {
+            if (curr->key >= key) {
                 if (level == 0 && curr->key == key) {
-                    return true;
+                    // Found the key - check if it's deleted
+                    bool marked = atomic_load(&curr->marked);
+                    return !marked;
                 }
                 break;
             }
             
-            if (!marked && curr->key < key) {
-                pred = curr;
-            }
-            
+            pred = curr;
             curr = atomic_load(&curr->next[level]);
         }
     }
