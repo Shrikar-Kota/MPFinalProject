@@ -156,58 +156,24 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
     return false;
 }
 
-// Contains - check both marked and fully_linked
+// Contains - simple and reliable
 bool skiplist_contains_lockfree(SkipList* list, int key) {
-    // Retry a few times to handle nodes being inserted
-    for (int attempt = 0; attempt < 10; attempt++) {
-        Node* pred = list->head;
-        
-        for (int level = list->maxLevel; level >= 0; level--) {
-            Node* curr = atomic_load(&pred->next[level]);
-            
-            while (curr != NULL && curr != list->tail) {
-                if (curr->key >= key) {
-                    if (level == 0 && curr->key == key) {
-                        // Found the key
-                        bool marked = atomic_load(&curr->marked);
-                        bool fully_linked = atomic_load(&curr->fully_linked);
-                        
-                        if (marked) {
-                            return false;  // Deleted
-                        }
-                        
-                        if (fully_linked) {
-                            return true;  // Fully inserted
-                        }
-                        
-                        // Node is being inserted, retry
-                        goto retry;
-                    }
-                    break;
-                }
-                
-                pred = curr;
-                curr = atomic_load(&curr->next[level]);
-            }
+    // Just traverse level 0 - simple and reliable
+    Node* curr = atomic_load(&list->head->next[0]);
+    
+    while (curr != NULL && curr != list->tail) {
+        if (curr->key == key) {
+            // Found it - check if deleted
+            bool marked = atomic_load(&curr->marked);
+            return !marked;
         }
         
-        // Not found
-        return false;
+        if (curr->key > key) {
+            // Passed it, not found
+            return false;
+        }
         
-retry:
-        continue;
-    }
-    
-    // After retries, do one final check
-    Node* pred = list->head;
-    Node* curr = atomic_load(&pred->next[0]);
-    
-    while (curr != NULL && curr != list->tail && curr->key < key) {
         curr = atomic_load(&curr->next[0]);
-    }
-    
-    if (curr != NULL && curr != list->tail && curr->key == key) {
-        return !atomic_load(&curr->marked);
     }
     
     return false;
