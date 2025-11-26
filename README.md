@@ -3,8 +3,8 @@
 A comprehensive implementation and performance analysis of three concurrent skip list variants with different synchronization strategies.
 
 ## Authors
-Shrikar Reddy Kota | Rohit Kumar Salla
-Multiprocessor Programming (ECE-5510)
+Shrikar Reddy Kota | Rohit Kumar Salla  
+Multiprocessor Programming (ECE-5510)  
 December 2025
 
 ---
