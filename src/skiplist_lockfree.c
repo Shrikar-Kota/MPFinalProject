@@ -1,23 +1,15 @@
 /**
- * TRUE Lock-Free Skip List with CAS-Only Operations
+ * Lock-Free Skip List - Standalone Version
  * 
- * Key Differences from Fine-Grained:
- * - NO LOCKS for insert/delete (only atomic CAS)
- * - Bounded retries with exponential backoff
- * - Logical deletion (marked flag)
- * - Wait-free contains
- * 
- * This is genuinely different from fine-grained!
+ * TRUE lock-free with CAS-only operations
+ * Simplified single-level design for reliability
+ * No dependencies on other implementations
  */
 
 #include "skiplist_common.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <limits.h>
-
-extern int epoch_enter(void);
-extern void epoch_exit(int my_epoch);
-extern void retire_node(Node* node);
 
 SkipList* skiplist_create_lockfree(void) {
     SkipList* list = (SkipList*)malloc(sizeof(SkipList));
@@ -70,7 +62,7 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
             return false;
         }
         
-        // Create node (level 0 only for simplicity and reliability)
+        // Create node (level 0 only for simplicity)
         Node* newNode = create_node(key, value, 0);
         atomic_store(&newNode->next[0], curr);
         atomic_store(&newNode->marked, false);
@@ -83,6 +75,7 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
         }
         
         // CAS failed, cleanup and retry
+        omp_destroy_lock(&newNode->lock);
         free(newNode);
         
         // Exponential backoff
@@ -108,7 +101,9 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
                 bool expected = false;
                 if (atomic_compare_exchange_strong(&curr->marked, &expected, true)) {
                     atomic_fetch_sub(&list->size, 1);
-                    retire_node(curr);  // Epoch-based reclamation
+                    // Note: Don't free immediately - lock-free contains might access
+                    // In production: use epoch-based reclamation
+                    // For project: memory leak is safer than crash
                     return true;
                 }
                 // Someone else deleted it
@@ -130,30 +125,26 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
 
 // Wait-free contains (no CAS needed, just reads)
 bool skiplist_contains_lockfree(SkipList* list, int key) {
-    int my_epoch = epoch_enter();
-    
     Node* curr = atomic_load(&list->head->next[0]);
     
     while (curr != NULL && curr != list->tail) {
         if (curr->key == key) {
             bool marked = atomic_load(&curr->marked);
-            epoch_exit(my_epoch);
             return !marked;
         }
         
         if (curr->key > key) {
-            epoch_exit(my_epoch);
             return false;
         }
         
         curr = atomic_load(&curr->next[0]);
     }
     
-    epoch_exit(my_epoch);
     return false;
 }
 
 void skiplist_destroy_lockfree(SkipList* list) {
+    // Safe to free everything at destroy time
     Node* curr = list->head;
     while (curr != NULL) {
         Node* next = atomic_load(&curr->next[0]);
