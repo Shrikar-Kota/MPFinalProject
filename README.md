@@ -2,10 +2,10 @@
 
 A comprehensive implementation and performance analysis of three concurrent skip list variants with different synchronization strategies.
 
-## Author
-[Your Name]  
-Parallel Programming Course  
-November 2024
+## Authors
+Shrikar Reddy Kota | Rohit Kumar Salla
+Multiprocessor Programming (ECE-5510)
+December 2025
 
 ---
 
@@ -268,24 +268,3 @@ Edit `src/benchmark.c` to change workload generation or metrics.
 4. Herlihy, M., & Shavit, N. (2008). *The Art of Multiprocessor Programming*. Morgan Kaufmann
 
 ---
-
-## License
-
-Academic project for educational purposes.
-
----
-
-## Contact
-
-[Your Name]  
-[Your Email]  
-[Course Information]
-
----
-
-## Acknowledgments
-
-- Course instructor and TAs
-- VT ARC Computing Cluster
-- OpenMP development team
-- Referenced research papers and implementations

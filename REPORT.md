@@ -1,7 +1,7 @@
 # Concurrent Skip List Implementations: A Performance Analysis
 
-**Author:** [Your Name]  
-**Course:** Parallel Programming  
+**Authors:** Shrikar Reddy Kota | Rohit Kumar Salla
+**Course:** Multiprocessor Programming (ECE-5510)  
 **Date:** November 2024
 
 ---
