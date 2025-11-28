@@ -3,14 +3,17 @@
 #include <stdio.h>
 #include <limits.h>
 #include <stdatomic.h>
-#include <sched.h> // For sched_yield()
+#include <sched.h> 
 
 /**
  * Fine-Grained Locking Skip List
  * 
- * Improvements:
- * - Prevents Use-After-Free by deferring free().
- * - Prevents Infinite Loops by checking `fully_linked` status.
+ * Key Features:
+ * - Optimistic Search (No locks during traversal)
+ * - Per-Node Locking (omp_lock_t)
+ * - Validation (Check-Wait-Act pattern)
+ * - Livelock Prevention: Search restarts if it encounters marked nodes
+ * - Use-After-Free Prevention: Defer free() to destroy time
  */
 
 SkipList* skiplist_create_fine(void) {
@@ -20,13 +23,13 @@ SkipList* skiplist_create_fine(void) {
     list->head = create_node(INT_MIN, 0, MAX_LEVEL);
     list->tail = create_node(INT_MAX, 0, MAX_LEVEL);
     
-    // Explicitly init locks
     omp_init_lock(&list->head->lock);
     omp_init_lock(&list->tail->lock);
 
-    // Mark sentinels as fully linked
     atomic_store(&list->head->fully_linked, true);
     atomic_store(&list->tail->fully_linked, true);
+    atomic_init(&list->head->marked, false);
+    atomic_init(&list->tail->marked, false);
 
     list->maxLevel = MAX_LEVEL;
     atomic_init(&list->size, 0);
@@ -39,24 +42,57 @@ SkipList* skiplist_create_fine(void) {
     return list;
 }
 
+/**
+ * Optimistic Search
+ * 
+ * Populates preds[] and succs[] for the given key.
+ * CRITICAL FIX: If we encounter a marked 'pred', we restart the search.
+ * This prevents returning a deleted node as a valid predecessor, 
+ * which would cause infinite validation failures in the caller.
+ */
 static void find_optimistic(SkipList* list, int key, Node** preds, Node** succs) {
-    Node* pred = list->head;
-    for (int level = list->maxLevel; level >= 0; level--) {
-        Node* curr = atomic_load(&pred->next[level]);
-        while (curr != list->tail && curr->key < key) {
-            pred = curr;
-            curr = atomic_load(&pred->next[level]);
+    while (true) {
+        bool restart = false;
+        Node* pred = list->head;
+        
+        for (int level = list->maxLevel; level >= 0; level--) {
+            Node* curr = atomic_load(&pred->next[level]);
+            
+            while (curr != list->tail && curr->key < key) {
+                pred = curr;
+                curr = atomic_load(&pred->next[level]);
+                
+                // If we traversed to a marked node, our path is invalid.
+                if (atomic_load(&pred->marked)) {
+                    restart = true;
+                    break;
+                }
+            }
+            
+            if (restart || atomic_load(&pred->marked)) {
+                restart = true;
+                break;
+            }
+            
+            preds[level] = pred;
+            succs[level] = curr;
         }
-        preds[level] = pred;
-        succs[level] = curr;
+        
+        if (!restart) return; // Success
+        // Implicit continue: retry search from head
     }
 }
 
+/**
+ * Validates that:
+ * 1. pred is not marked
+ * 2. succ is not marked
+ * 3. pred->next points to succ
+ */
 static bool validate_link(Node* pred, Node* succ, int level) {
-    bool pred_marked = atomic_load(&pred->marked);
-    bool succ_marked = atomic_load(&succ->marked);
-    Node* actual_next = atomic_load(&pred->next[level]);
-    return !pred_marked && !succ_marked && (actual_next == succ);
+    return !atomic_load(&pred->marked) && 
+           !atomic_load(&succ->marked) && 
+           (atomic_load(&pred->next[level]) == succ);
 }
 
 bool skiplist_insert_fine(SkipList* list, int key, int value) {
@@ -66,18 +102,20 @@ bool skiplist_insert_fine(SkipList* list, int key, int value) {
     while (true) {
         find_optimistic(list, key, preds, succs);
         
+        // Optimistic check for duplicates
         if (succs[0] != list->tail && succs[0]->key == key) {
             return false; 
         }
         
+        // Lock Level 0 (Linearization point)
         omp_set_lock(&preds[0]->lock);
         
         if (!validate_link(preds[0], succs[0], 0)) {
             omp_unset_lock(&preds[0]->lock);
-            continue; 
+            continue; // Validation failed, retry
         }
         
-        // Double check for existence
+        // Check for duplicates again under lock
         if (succs[0] != list->tail && succs[0]->key == key) {
             omp_unset_lock(&preds[0]->lock);
             return false;
@@ -86,7 +124,6 @@ bool skiplist_insert_fine(SkipList* list, int key, int value) {
         int topLevel = random_level();
         Node* newNode = create_node(key, value, topLevel);
         
-        // Fill next pointers
         for (int i = 0; i <= topLevel; i++) {
             atomic_store(&newNode->next[i], succs[i]);
         }
@@ -104,16 +141,31 @@ bool skiplist_insert_fine(SkipList* list, int key, int value) {
                 
                 if (!validate_link(preds[i], succs[i], i)) {
                     omp_unset_lock(&preds[i]->lock);
-                    // Re-search this level
+                    // Re-search this level specifically
+                    // We must apply the same "restart if marked" logic here
                     Node* p = list->head;
                     Node* c = atomic_load(&p->next[i]);
-                    while(c != list->tail && c->key < key) {
-                        p = c; 
+                    bool level_restart = false;
+                    
+                    while (c != list->tail && c->key < key) {
+                        p = c;
                         c = atomic_load(&p->next[i]);
+                        if (atomic_load(&p->marked)) {
+                            // Pred is dead, we must restart search from head for this level
+                            p = list->head;
+                            c = atomic_load(&p->next[i]);
+                        }
                     }
+                    
+                    // Final check on p
+                    if (atomic_load(&p->marked)) {
+                         // Extremely unlucky race, just loop again
+                         continue;
+                    }
+                    
                     preds[i] = p;
                     succs[i] = c;
-                    continue; 
+                    continue; // Retry lock
                 }
                 
                 atomic_store(&newNode->next[i], succs[i]);
@@ -123,7 +175,6 @@ bool skiplist_insert_fine(SkipList* list, int key, int value) {
             }
         }
         
-        // Mark as fully linked ONLY after all levels are connected
         atomic_store(&newNode->fully_linked, true);
         return true;
     }
@@ -137,6 +188,7 @@ bool skiplist_delete_fine(SkipList* list, int key) {
         find_optimistic(list, key, preds, succs);
         Node* victim = succs[0];
         
+        // If not found or key mismatch
         if (victim == list->tail || victim->key != key) {
             return false;
         }
@@ -145,20 +197,19 @@ bool skiplist_delete_fine(SkipList* list, int key) {
         
         if (atomic_load(&victim->marked)) {
             omp_unset_lock(&victim->lock);
-            return false; 
+            return false; // Already deleted
         }
         
         if (victim->key != key) {
             omp_unset_lock(&victim->lock);
-            continue;
+            continue; // Node changed identity (unlikely with this allocator, but safe)
         }
 
-        // CRITICAL FIX: Check if node is fully fully_linked.
-        // If not, it's being inserted right now. We must wait.
+        // Wait for node to be fully inserted
         if (!atomic_load(&victim->fully_linked)) {
             omp_unset_lock(&victim->lock);
-            sched_yield(); // Yield CPU to let inserter finish
-            continue;      // Retry loop
+            sched_yield(); 
+            continue;
         }
         
         // Logically delete
@@ -170,16 +221,26 @@ bool skiplist_delete_fine(SkipList* list, int key) {
             while (true) {
                 omp_set_lock(&preds[i]->lock);
                 
+                // Validate predecessor points to victim
                 if (atomic_load(&preds[i]->next[i]) != victim) {
                     omp_unset_lock(&preds[i]->lock);
-                    // Re-search
+                    
+                    // Re-search logic with safety against marked nodes
                     Node* p = list->head;
                     Node* c = atomic_load(&p->next[i]);
-                    while(c != list->tail && c->key < key) { p = c; c = atomic_load(&p->next[i]); }
+                    while (c != list->tail && c->key < key) {
+                        p = c;
+                        c = atomic_load(&p->next[i]);
+                        if (atomic_load(&p->marked)) {
+                            p = list->head;
+                            c = atomic_load(&p->next[i]);
+                        }
+                    }
                     preds[i] = p;
                     continue;
                 }
                 
+                // Unlink
                 Node* next = atomic_load(&victim->next[i]);
                 atomic_store(&preds[i]->next[i], next);
                 omp_unset_lock(&preds[i]->lock);
@@ -188,7 +249,7 @@ bool skiplist_delete_fine(SkipList* list, int key) {
         }
         
         atomic_fetch_sub(&list->size, 1);
-        // Do not free(victim) to avoid Use-After-Free
+        // Do not free() to prevent UAF
         return true;
     }
 }
@@ -205,7 +266,6 @@ bool skiplist_contains_fine(SkipList* list, int key) {
         }
     }
     
-    // Check key, fully_linked, and marked
     return (curr != list->tail && 
             curr->key == key && 
             atomic_load(&curr->fully_linked) && 
