@@ -3,29 +3,34 @@
 #include <stdio.h>
 #include <time.h>
 #include <limits.h>
+#include <unistd.h>
+#include <sys/time.h>
 
 // Thread-local random state
 static __thread unsigned int seed = 0;
 
-// Initialize thread-local seed
+// Initialize thread-local seed with Nanosecond precision
+// This prevents "Duplicate Run" errors when executed fast.
 void init_random_seed(void) {
-    seed = (unsigned int)time(NULL) ^ (unsigned int)omp_get_thread_num();
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    // Combine seconds, nanoseconds, and thread ID for a unique seed
+    seed = (unsigned int)(ts.tv_sec ^ ts.tv_nsec ^ omp_get_thread_num());
 }
 
-// Generate random level for new node
 int random_level(void) {
     if (seed == 0) {
         init_random_seed();
     }
     
     int level = 0;
+    // Standard skip list level generation
     while (level < MAX_LEVEL && (rand_r(&seed) / (double)RAND_MAX) < P_FACTOR) {
         level++;
     }
     return level;
 }
 
-// Create a new node
 Node* create_node(int key, int value, int level) {
     Node* node = (Node*)malloc(sizeof(Node));
     if (!node) {
@@ -37,29 +42,25 @@ Node* create_node(int key, int value, int level) {
     node->value = value;
     node->topLevel = level;
     atomic_init(&node->marked, false);
-    atomic_init(&node->fully_linked, false);  // Not linked yet
+    atomic_init(&node->fully_linked, false);
     
     for (int i = 0; i <= MAX_LEVEL; i++) {
         atomic_init(&node->next[i], NULL);
     }
     
     omp_init_lock(&node->lock);
-    
     return node;
 }
 
-// Print skip list structure (for debugging)
 void print_skiplist(SkipList* list) {
     printf("\n=== Skip List Structure ===\n");
-    
     for (int level = list->maxLevel; level >= 0; level--) {
         printf("Level %2d: HEAD -> ", level);
         Node* curr = atomic_load(&list->head->next[level]);
-        
         while (curr != list->tail) {
-            bool marked = atomic_load(&curr->marked);
+            bool marked = IS_MARKED(atomic_load(&curr->next[0])); // Check LSB for lock-free
             printf("%d%s -> ", curr->key, marked ? "(D)" : "");
-            curr = atomic_load(&curr->next[level]);
+            curr = GET_UNMARKED(atomic_load(&curr->next[level]));
         }
         printf("TAIL\n");
     }
@@ -67,25 +68,20 @@ void print_skiplist(SkipList* list) {
     printf("===========================\n\n");
 }
 
-// Validate skip list structure
 bool validate_skiplist(SkipList* list) {
     for (int level = 0; level <= list->maxLevel; level++) {
-        Node* curr = atomic_load(&list->head->next[level]);
+        Node* curr = GET_UNMARKED(atomic_load(&list->head->next[level]));
         int prev_key = INT_MIN;
         
         while (curr != list->tail) {
-            // Skip nodes that are not fully linked yet or are marked for deletion
-            bool fully_linked = atomic_load(&curr->fully_linked);
-            bool marked = atomic_load(&curr->marked);
-            
-            if (fully_linked && !marked) {
-                if (curr->key <= prev_key) {
-                    fprintf(stderr, "Validation failed: unsorted at level %d\n", level);
-                    return false;
-                }
-                prev_key = curr->key;
+            // In lock-free, we might traverse logically deleted nodes.
+            // We only validate order.
+            if (curr->key < prev_key) {
+                fprintf(stderr, "Validation failed: unsorted at level %d (Prev: %d, Curr: %d)\n", level, prev_key, curr->key);
+                return false;
             }
-            curr = atomic_load(&curr->next[level]);
+            prev_key = curr->key;
+            curr = GET_UNMARKED(atomic_load(&curr->next[level]));
         }
     }
     return true;
