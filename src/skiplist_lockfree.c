@@ -14,35 +14,33 @@
 #define GET_UNMARKED(p)   ((Node*)((uintptr_t)(p) & ~MARK_BIT))
 #define GET_MARKED(p)     ((Node*)((uintptr_t)(p) | MARK_BIT))
 
-// Tuning parameters
-#define BACKOFF_BASE_SPINS 4
-#define BACKOFF_MAX_SPINS  2048
-#define TOWER_BUILD_RETRIES 2
-#define YIELD_THRESHOLD 16
+// PERFORMANCE TUNING
+// ------------------
+// Base spins: How long to wait on first failure (low latency)
+#define BACKOFF_BASE_SPINS 1 
+// Max spins: Cap the waiting time so we don't sleep too long
+#define BACKOFF_MAX_SPINS  1000
+// Tower Retries: Try HARDER to build the skip list tower. 
+// Previous value of 2 caused flat lists (O(N) search). 
+// 100 ensures we build good O(log N) structures even under load.
+#define TOWER_BUILD_RETRIES 100
+// Yield Threshold: Only sleep the thread if things are REALLY bad
+#define YIELD_THRESHOLD 20
 
-/**
- * CPU Relax / Pause instruction
- * hints to the processor that we are in a spin-wait loop.
- */
 static inline void cpu_relax() {
 #if defined(__x86_64__) || defined(__i386__)
     __builtin_ia32_pause();
 #elif defined(__aarch64__)
     __asm__ __volatile__("yield");
 #else
-    // Compiler barrier for other architectures
     __asm__ __volatile__("" ::: "memory");
 #endif
 }
 
-/**
- * Exponential Backoff
- * Reduces bus contention during high-load CAS failures.
- */
 static void backoff(int *attempt) {
     (*attempt)++;
     
-    // If contention is extreme, yield the processor to let the winner finish.
+    // Only yield CPU if we are stuck in a massive CAS storm
     if (*attempt > YIELD_THRESHOLD) {
         sched_yield();
         return;
@@ -154,8 +152,7 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
         
         atomic_fetch_add(&list->size, 1);
         
-        // Build Tower (Performance Optimization)
-        // In high contention, we effectively skip this or stop early.
+        // Build Tower (Performance Optimized)
         for (int i = 1; i <= topLevel; i++) {
             int build_attempts = 0;
             
@@ -167,7 +164,7 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
                     break; // Success
                 }
                 
-                // Aggressive give-up: If we failed twice, just stop.
+                // Retry significantly more times to ensure good O(log N) structure
                 if (++build_attempts >= TOWER_BUILD_RETRIES) {
                     goto stop_building; 
                 }
@@ -180,7 +177,7 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
                 }
                 
                 atomic_store(&newNode->next[i], succs[i]);
-                cpu_relax(); // Light pause
+                cpu_relax(); // Light pause only
             }
         }
         
@@ -219,7 +216,6 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
                 }
                 
                 // Optimization: If upper level mark fails, ignore it and move down.
-                // We only truly care about Level 0.
                 if (i > 0) break;
                 
                 // Level 0 MUST succeed
