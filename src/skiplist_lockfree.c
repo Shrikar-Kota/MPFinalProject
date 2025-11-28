@@ -7,20 +7,19 @@
 #include <time.h>
 
 // ------------------------------------------------------------------------
-// Configuration & Macros
+// Configuration
 // ------------------------------------------------------------------------
 // IS_MARKED, GET_UNMARKED are in skiplist_common.h
 
-// Tuning for High Contention (16+ Threads)
 #define BACKOFF_BASE_SPINS 1
 #define BACKOFF_MAX_SPINS  2048
 
-// CRITICAL: Yield sooner. 
-// With 16 threads, spinning too long creates a "Convoy Effect".
-// Yielding lets the thread holding the 'state' finish faster.
-#define YIELD_THRESHOLD 3 
+// CRITICAL: Low yield threshold for high threads (16+)
+#define YIELD_THRESHOLD 5 
 
-#define TOWER_BUILD_RETRIES 50 
+// CRITICAL: Stop building towers instantly if there is contention.
+// A flat node is better than a hanging system.
+#define TOWER_BUILD_RETRIES 2 
 
 static inline void cpu_relax() {
 #if defined(__x86_64__) || defined(__i386__)
@@ -66,10 +65,6 @@ SkipList* skiplist_create_lockfree(void) {
     return list;
 }
 
-/**
- * Robust Find with Local Recovery.
- * Prevents Livelock by avoiding global restarts when possible.
- */
 static bool find(SkipList* list, int key, Node** preds, Node** succs) {
     int bottomLevel = 0;
     int attempt = 0;
@@ -92,24 +87,11 @@ retry:
                     
                     // Attempt physical removal
                     if (!atomic_compare_exchange_strong(&pred->next[level], &curr, unmarked_succ)) {
-                        // CAS FAILED.
-                        backoff(&attempt);
-                        
-                        // CRITICAL FIX: Local Recovery.
-                        // Instead of blindly 'goto retry' (Head), check if pred is dead.
-                        Node* ref = atomic_load(&pred->next[level]);
-                        
-                        if (IS_MARKED(ref)) {
-                            // Pred is dead. Must restart from Head.
-                            goto retry;
-                        }
-                        
-                        // Pred is alive! 'curr' just changed (e.g. insert or another delete).
-                        // We update 'curr' and stay in the loop.
-                        curr = GET_UNMARKED(ref);
-                        if (curr == NULL) break;
-                        succ = atomic_load(&curr->next[level]);
-                        continue; // Re-evaluate loop with new curr
+                        // CAS Failed. 
+                        // Standard Harris behavior: Restart from HEAD.
+                        // This prevents getting stuck in local loops with bad pointers.
+                        backoff(&attempt); 
+                        goto retry; 
                     }
                     
                     // Success. Move forward.
@@ -120,7 +102,6 @@ retry:
                 
                 if (curr == NULL) break;
                 
-                // Traversal
                 if (curr != list->tail && curr->key < key) {
                     pred = curr;
                     curr = GET_UNMARKED(succ);
@@ -144,14 +125,12 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
     
     while (true) {
         if (find(list, key, preds, succs)) {
-            // Found a node with the key.
-            // Check if it's a "Zombie" (marked for deletion but physically present).
+            // Check for Zombie node
             Node* found = succs[0];
             if (!IS_MARKED(atomic_load(&found->next[0]))) {
-                return false; // It's alive. Key exists.
+                return false; // Key exists and is alive
             }
-            // It's a Zombie. Ignore it and proceed to insert our new node.
-            // (Standard behavior: insert physically before the zombie, zombie eventually vanishes).
+            // It is marked (Zombie). Ignore it and insert.
         }
         
         int topLevel = random_level(); 
@@ -186,7 +165,7 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
                     break; 
                 }
                 
-                // Stop if too difficult
+                // CRITICAL LIMIT: Give up almost immediately.
                 if (++build_attempts >= TOWER_BUILD_RETRIES) {
                     goto stop_building; 
                 }
@@ -221,7 +200,7 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
         
         victim = succs[0];
         
-        // Logical Deletion (Marking)
+        // Logical Deletion - Mark ALL levels
         for (int i = victim->topLevel; i >= 0; i--) {
             while (true) {
                 Node* succ = atomic_load(&victim->next[i]);
@@ -236,10 +215,12 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
                     break; 
                 }
                 
-                // Optimization: If upper level fails, ignore.
-                if (i > 0) break;
+                // Retry Level 0 aggressively, backoff on others
+                if (i > 0) backoff(&attempt); // Soft retry for upper levels
+                else backoff(&attempt);       // Hard retry for level 0
                 
-                backoff(&attempt);
+                // If Upper level loop spins too long, we could break, 
+                // but marking all is safer for 'find' performance.
             }
         }
         
