@@ -9,17 +9,15 @@
 // ------------------------------------------------------------------------
 // Configuration
 // ------------------------------------------------------------------------
-// IS_MARKED, GET_UNMARKED, etc. are in skiplist_common.h
+// IS_MARKED, GET_UNMARKED are in skiplist_common.h
 
 #define BACKOFF_BASE_SPINS 1
 #define BACKOFF_MAX_SPINS  2048
 #define YIELD_THRESHOLD 20
 
-// CRITICAL FIX FOR 16-THREAD HANG:
-// Limit the attempts to build upper levels. 
-// If we fail twice, we stop. This prevents threads from fighting forever 
-// over structural pointers, eliminating the Livelock.
-#define TOWER_BUILD_RETRIES 2
+// Balance: High enough to build tall towers (Scalability), 
+// Low enough to break livelocks (Contention).
+#define TOWER_BUILD_RETRIES 50 
 
 static inline void cpu_relax() {
 #if defined(__x86_64__) || defined(__i386__)
@@ -87,10 +85,7 @@ retry:
                     
                     // Attempt physical removal
                     if (!atomic_compare_exchange_strong(&pred->next[level], &curr, unmarked_succ)) {
-                        // CAS Failed.
-                        // We use the Standard Harris restart mechanism here.
-                        // It is safer for correctness/scalability than the "Smart" recovery.
-                        // The backoff() prevents the livelock.
+                        // CAS Failed. Restarting is the safest way to ensure consistency.
                         backoff(&attempt); 
                         goto retry; 
                     }
@@ -126,7 +121,14 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
     
     while (true) {
         if (find(list, key, preds, succs)) {
-            return false; // Key exists
+            // FIX: If found node is marked (Zombie), we treat it as deleted and continue inserting.
+            Node* found = succs[0];
+            if (!IS_MARKED(atomic_load(&found->next[0]))) {
+                return false; // Truly exists
+            }
+            // Else: It is marked, so we ignore it and insert our new node.
+            // Note: preds[0] -> found(marked). We will insert new -> found.
+            // Eventually found is removed, preds[0] -> new. Correct.
         }
         
         int topLevel = random_level(); 
@@ -161,9 +163,7 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
                     break; 
                 }
                 
-                // CRITICAL FIX: Give up quickly.
-                // If we can't link Level 'i' in 2 tries, we stop building.
-                // This frees up the thread to do other work and stops the livelock.
+                // Stop building if too difficult, but retry enough to get good height
                 if (++build_attempts >= TOWER_BUILD_RETRIES) {
                     goto stop_building; 
                 }
@@ -198,24 +198,24 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
         
         victim = succs[0];
         
-        // Logical Deletion
+        // Logical Deletion - Mark ALL levels
+        // We do not skip levels on failure. We ensure the node is fully marked.
+        // This prevents "Zombie Nodes" from confusing 'find' and 'insert'.
         for (int i = victim->topLevel; i >= 0; i--) {
             while (true) {
                 Node* succ = atomic_load(&victim->next[i]);
                 
                 if (IS_MARKED(succ)) {
-                    if (i == 0) return false; 
-                    break; 
+                    if (i == 0) return false; // Already deleted by another thread
+                    break; // Already marked at this level
                 }
                 
                 Node* marked_succ = GET_MARKED(succ);
                 if (atomic_compare_exchange_strong(&victim->next[i], &succ, marked_succ)) {
-                    break; 
+                    break; // Successfully marked
                 }
                 
-                // If upper level fails, ignore and move down.
-                if (i > 0) break;
-                
+                // Retry until marked or found to be already marked
                 backoff(&attempt);
             }
         }
