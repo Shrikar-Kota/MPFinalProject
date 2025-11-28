@@ -3,186 +3,281 @@
 #include <stdio.h>
 #include <limits.h>
 #include <stdatomic.h>
-#include <sched.h> 
+#include <sched.h>
+#include <time.h>
 
-SkipList* skiplist_create_fine(void) {
+// ------------------------------------------------------------------------
+// Configuration
+// ------------------------------------------------------------------------
+// IS_MARKED, GET_UNMARKED are in skiplist_common.h
+
+#define BACKOFF_BASE_SPINS 1
+#define BACKOFF_MAX_SPINS  4096
+
+// CRITICAL: Yield very early. 
+// At 8+ threads, spinning burns cycles that block the thread holding the lock/state.
+#define YIELD_THRESHOLD 3 
+
+// CRITICAL: Stop building towers immediately if blocked.
+// A node at Level 0 is valid. A hung thread is not.
+#define TOWER_BUILD_RETRIES 2
+
+static inline void cpu_relax() {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield");
+#else
+    __asm__ __volatile__("" ::: "memory");
+#endif
+}
+
+static void backoff(int *attempt) {
+    (*attempt)++;
+    if (*attempt > YIELD_THRESHOLD) {
+        sched_yield();
+        return;
+    }
+    int spins = BACKOFF_BASE_SPINS << *attempt;
+    if (spins > BACKOFF_MAX_SPINS) spins = BACKOFF_MAX_SPINS;
+    for (volatile int i = 0; i < spins; i++) {
+        cpu_relax();
+    }
+}
+
+// ------------------------------------------------------------------------
+// Lock-Free Implementation
+// ------------------------------------------------------------------------
+
+SkipList* skiplist_create_lockfree(void) {
     SkipList* list = (SkipList*)malloc(sizeof(SkipList));
     if (!list) exit(1);
     
     list->head = create_node(INT_MIN, 0, MAX_LEVEL);
     list->tail = create_node(INT_MAX, 0, MAX_LEVEL);
     
-    omp_init_lock(&list->head->lock);
-    omp_init_lock(&list->tail->lock);
-
-    atomic_store(&list->head->fully_linked, true);
-    atomic_store(&list->tail->fully_linked, true);
-    atomic_init(&list->head->marked, false);
-    atomic_init(&list->tail->marked, false);
-
-    list->maxLevel = MAX_LEVEL;
-    atomic_init(&list->size, 0);
-    
     for (int i = 0; i <= MAX_LEVEL; i++) {
         atomic_store(&list->head->next[i], list->tail);
-        atomic_store(&list->tail->next[i], NULL);
     }
+    
+    atomic_init(&list->size, 0);
+    list->maxLevel = MAX_LEVEL;
     
     return list;
 }
 
-static void find_optimistic(SkipList* list, int key, Node** preds, Node** succs) {
-    Node* pred = list->head;
-    for (int level = list->maxLevel; level >= 0; level--) {
-        Node* curr = atomic_load(&pred->next[level]);
-        while (curr != list->tail && curr->key < key) {
-            pred = curr;
-            curr = atomic_load(&pred->next[level]);
+/**
+ * Robust Harris Find.
+ * Uses restart-from-head (safest) but relies on aggressive backoff
+ * to prevent livelock during high contention.
+ */
+static bool find(SkipList* list, int key, Node** preds, Node** succs) {
+    int bottomLevel = 0;
+    int attempt = 0;
+    
+retry:
+    while (true) {
+        Node* pred = list->head;
+        
+        for (int level = list->maxLevel; level >= bottomLevel; level--) {
+            Node* curr = GET_UNMARKED(atomic_load(&pred->next[level]));
+            
+            while (true) {
+                if (curr == NULL) break; 
+
+                Node* succ = atomic_load(&curr->next[level]);
+                
+                // Helping: Check if marked
+                while (IS_MARKED(succ)) {
+                    Node* unmarked_succ = GET_UNMARKED(succ);
+                    
+                    // Attempt physical removal
+                    if (!atomic_compare_exchange_strong(&pred->next[level], &curr, unmarked_succ)) {
+                        // CAS Failed. The list structure changed.
+                        // Backoff aggressively and restart.
+                        backoff(&attempt); 
+                        goto retry; 
+                    }
+                    
+                    // Success. Move forward.
+                    curr = unmarked_succ;
+                    if (curr == NULL) break;
+                    succ = atomic_load(&curr->next[level]);
+                }
+                
+                if (curr == NULL) break;
+                
+                // Traversal
+                if (curr != list->tail && curr->key < key) {
+                    pred = curr;
+                    curr = GET_UNMARKED(succ);
+                } else {
+                    break; 
+                }
+            }
+            
+            preds[level] = pred;
+            succs[level] = curr;
         }
-        preds[level] = pred;
-        succs[level] = curr;
+        
+        return (succs[bottomLevel] != list->tail && succs[bottomLevel]->key == key);
     }
 }
 
-static bool validate_link(Node* pred, Node* succ, int level) {
-    return !atomic_load(&pred->marked) && 
-           !atomic_load(&succ->marked) && 
-           (atomic_load(&pred->next[level]) == succ);
-}
-
-bool skiplist_insert_fine(SkipList* list, int key, int value) {
+bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
     Node* preds[MAX_LEVEL + 1];
     Node* succs[MAX_LEVEL + 1];
+    int attempt = 0;
     
     while (true) {
-        find_optimistic(list, key, preds, succs);
-        
-        Node* found = succs[0];
-        if (found != list->tail && found->key == key) {
-            if (!atomic_load(&found->marked)) return false; 
-        }
-        
-        omp_set_lock(&preds[0]->lock);
-        
-        if (!validate_link(preds[0], succs[0], 0)) {
-            omp_unset_lock(&preds[0]->lock);
-            continue; 
-        }
-        
-        found = succs[0];
-        if (found != list->tail && found->key == key) {
-            if (!atomic_load(&found->marked)) {
-                omp_unset_lock(&preds[0]->lock);
-                return false;
+        if (find(list, key, preds, succs)) {
+            // Found a node. Check if it is a Zombie.
+            Node* found = succs[0];
+            if (!IS_MARKED(atomic_load(&found->next[0]))) {
+                return false; // Key exists and is alive
             }
+            // It is marked (Zombie). 
+            // The standard algorithm will insert the new node *before* the zombie 
+            // (since the zombie key == new key, and search stops at >=).
+            // This is acceptable behavior; the zombie will be cleaned up later.
         }
         
-        int topLevel = random_level();
+        int topLevel = random_level(); 
         Node* newNode = create_node(key, value, topLevel);
         
         for (int i = 0; i <= topLevel; i++) {
             atomic_store(&newNode->next[i], succs[i]);
         }
         
-        atomic_store(&preds[0]->next[0], newNode);
-        omp_unset_lock(&preds[0]->lock);
+        // Link Level 0 (Linearization Point)
+        Node* pred = preds[0];
+        Node* succ = succs[0];
+        
+        if (!atomic_compare_exchange_strong(&pred->next[0], &succ, newNode)) {
+            omp_destroy_lock(&newNode->lock);
+            free(newNode);
+            backoff(&attempt); 
+            continue; 
+        }
+        
         atomic_fetch_add(&list->size, 1);
         
+        // Build Tower (Fail-Fast)
         for (int i = 1; i <= topLevel; i++) {
+            int build_attempts = 0;
+            
             while (true) {
-                omp_set_lock(&preds[i]->lock);
-                if (!validate_link(preds[i], succs[i], i)) {
-                    omp_unset_lock(&preds[i]->lock);
-                    Node* p = list->head;
-                    Node* c = atomic_load(&p->next[i]);
-                    while (c != list->tail && c->key < key) {
-                        p = c;
-                        c = atomic_load(&p->next[i]);
-                    }
-                    preds[i] = p;
-                    succs[i] = c;
-                    continue; 
+                pred = preds[i];
+                succ = succs[i];
+                
+                if (atomic_compare_exchange_strong(&pred->next[i], &succ, newNode)) {
+                    break; 
                 }
+                
+                // If we fail TWICE, we stop. 
+                // Don't clog the bus trying to build a perfect tower.
+                if (++build_attempts >= TOWER_BUILD_RETRIES) {
+                    goto stop_building; 
+                }
+                
+                find(list, key, preds, succs);
+                
+                if (IS_MARKED(atomic_load(&newNode->next[0]))) {
+                    goto stop_building; 
+                }
+                
                 atomic_store(&newNode->next[i], succs[i]);
-                atomic_store(&preds[i]->next[i], newNode);
-                omp_unset_lock(&preds[i]->lock);
-                break;
+                cpu_relax();
             }
         }
+        
+    stop_building:
         atomic_store(&newNode->fully_linked, true);
         return true;
     }
 }
 
-bool skiplist_delete_fine(SkipList* list, int key) {
+bool skiplist_delete_lockfree(SkipList* list, int key) {
     Node* preds[MAX_LEVEL + 1];
     Node* succs[MAX_LEVEL + 1];
+    Node* victim;
+    int attempt = 0;
+    
     while (true) {
-        find_optimistic(list, key, preds, succs);
-        Node* victim = succs[0];
-        
-        if (victim == list->tail || victim->key != key) return false;
-        
-        omp_set_lock(&victim->lock);
-        
-        if (atomic_load(&victim->marked)) {
-            omp_unset_lock(&victim->lock);
-            return false;
-        }
-        if (victim->key != key) {
-            omp_unset_lock(&victim->lock);
-            continue; 
-        }
-        if (!atomic_load(&victim->fully_linked)) {
-            omp_unset_lock(&victim->lock);
+        if (!find(list, key, preds, succs)) {
             return false; 
         }
         
-        atomic_store(&victim->marked, true);
-        omp_unset_lock(&victim->lock);
+        victim = succs[0];
         
+        // Logical Deletion
         for (int i = victim->topLevel; i >= 0; i--) {
             while (true) {
-                omp_set_lock(&preds[i]->lock);
-                if (atomic_load(&preds[i]->marked) || atomic_load(&preds[i]->next[i]) != victim) {
-                    omp_unset_lock(&preds[i]->lock);
-                    Node* p = list->head;
-                    Node* c = atomic_load(&p->next[i]);
-                    while (c != list->tail && c->key < key) {
-                        p = c;
-                        c = atomic_load(&p->next[i]);
-                    }
-                    preds[i] = p;
-                    continue;
+                Node* succ = atomic_load(&victim->next[i]);
+                
+                if (IS_MARKED(succ)) {
+                    if (i == 0) return false; 
+                    break; 
                 }
-                Node* next = atomic_load(&victim->next[i]);
-                atomic_store(&preds[i]->next[i], next);
-                omp_unset_lock(&preds[i]->lock);
-                break;
+                
+                Node* marked_succ = GET_MARKED(succ);
+                if (atomic_compare_exchange_strong(&victim->next[i], &succ, marked_succ)) {
+                    break; 
+                }
+                
+                // Fail-Fast: If Upper Level mark fails, ignore it and move down.
+                if (i > 0) break;
+                
+                // Level 0 Must Succeed (or fail if already marked)
+                backoff(&attempt);
             }
         }
+        
+        // Physical Cleanup
+        find(list, key, preds, succs);
+        
         atomic_fetch_sub(&list->size, 1);
         return true;
     }
 }
 
-bool skiplist_contains_fine(SkipList* list, int key) {
+bool skiplist_contains_lockfree(SkipList* list, int key) {
     Node* pred = list->head;
-    Node* curr = NULL;
+    
     for (int level = list->maxLevel; level >= 0; level--) {
-        curr = atomic_load(&pred->next[level]);
-        while (curr != list->tail && curr->key < key) {
-            pred = curr;
-            curr = atomic_load(&pred->next[level]);
+        Node* curr = GET_UNMARKED(atomic_load(&pred->next[level]));
+        
+        while (true) {
+            if (curr == NULL || curr == list->tail) break;
+            Node* succ = atomic_load(&curr->next[level]);
+            
+            while (IS_MARKED(succ)) {
+                curr = GET_UNMARKED(succ);
+                if (curr == NULL || curr == list->tail) goto next_level;
+                succ = atomic_load(&curr->next[level]);
+            }
+            
+            if (curr->key < key) {
+                pred = curr;
+                curr = GET_UNMARKED(succ);
+            } else {
+                break;
+            }
         }
+        next_level:;
     }
-    return (curr != list->tail && curr->key == key && atomic_load(&curr->fully_linked) && !atomic_load(&curr->marked));
+    
+    Node* curr = GET_UNMARKED(atomic_load(&pred->next[0]));
+    
+    return (curr != list->tail && 
+            curr->key == key && 
+            !IS_MARKED(atomic_load(&curr->next[0])));
 }
 
-void skiplist_destroy_fine(SkipList* list) {
+void skiplist_destroy_lockfree(SkipList* list) {
     Node* curr = list->head;
     while (curr) {
-        Node* next = atomic_load(&curr->next[0]);
+        Node* next = GET_UNMARKED(atomic_load(&curr->next[0]));
         omp_destroy_lock(&curr->lock);
         free(curr);
         curr = next;
