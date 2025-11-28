@@ -7,22 +7,38 @@
 #include <time.h>
 
 // ------------------------------------------------------------------------
-// Tuning for High Contention
+// Configuration & Macros
 // ------------------------------------------------------------------------
 #define MARK_BIT 1
 #define IS_MARKED(p)      ((uintptr_t)(p) & MARK_BIT)
 #define GET_UNMARKED(p)   ((Node*)((uintptr_t)(p) & ~MARK_BIT))
 #define GET_MARKED(p)     ((Node*)((uintptr_t)(p) | MARK_BIT))
 
-// Optimization: In high contention, stop trying to build tall nodes.
-// A node at Level 0 is valid. Building higher levels is just optimization.
-// If we fail TWICE, we stop.
+// Tuning parameters
+#define BACKOFF_BASE_SPINS 4
+#define BACKOFF_MAX_SPINS  2048
 #define TOWER_BUILD_RETRIES 2
-
-// Optimization: Backoff configuration
-// If we fail > 16 times, yield the CPU entirely (sleep)
 #define YIELD_THRESHOLD 16
 
+/**
+ * CPU Relax / Pause instruction
+ * hints to the processor that we are in a spin-wait loop.
+ */
+static inline void cpu_relax() {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield");
+#else
+    // Compiler barrier for other architectures
+    __asm__ __volatile__("" ::: "memory");
+#endif
+}
+
+/**
+ * Exponential Backoff
+ * Reduces bus contention during high-load CAS failures.
+ */
 static void backoff(int *attempt) {
     (*attempt)++;
     
@@ -31,17 +47,12 @@ static void backoff(int *attempt) {
         sched_yield();
         return;
     }
+
+    int spins = BACKOFF_BASE_SPINS << *attempt;
+    if (spins > BACKOFF_MAX_SPINS) spins = BACKOFF_MAX_SPINS;
     
-    // Otherwise, exponential spin loop (CPU Pause)
-    int spins = 1 << *attempt; // 2, 4, 8, 16...
     for (volatile int i = 0; i < spins; i++) {
-#if defined(__x86_64__) || defined(__i386__)
-        __builtin_ia32_pause();
-#elif defined(__aarch64__)
-        __asm__ __volatile__("yield");
-#else
-        __asm__ __volatile__("" ::: "memory");
-#endif
+        cpu_relax();
     }
 }
 
@@ -130,7 +141,7 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
             atomic_store(&newNode->next[i], succs[i]);
         }
         
-        // Link Level 0 (The only mandatory link)
+        // Link Level 0 (Linearization Point)
         Node* pred = preds[0];
         Node* succ = succs[0];
         
@@ -157,8 +168,6 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
                 }
                 
                 // Aggressive give-up: If we failed twice, just stop.
-                // The node is linked at Level 0, so the list is correct.
-                // We sacrifice lookup speed slightly for insert throughput.
                 if (++build_attempts >= TOWER_BUILD_RETRIES) {
                     goto stop_building; 
                 }
@@ -195,9 +204,6 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
         victim = succs[0];
         
         // Logical Deletion (Marking)
-        // Mark Level 0 first? No, Harris marks top-down usually, 
-        // but for performance, we need Level 0 marked to define "deleted".
-        // We will try to mark all levels to help 'find' performance.
         for (int i = victim->topLevel; i >= 0; i--) {
             while (true) {
                 Node* succ = atomic_load(&victim->next[i]);
