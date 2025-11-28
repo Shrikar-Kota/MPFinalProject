@@ -8,16 +8,10 @@
 /**
  * Fine-Grained Locking Skip List
  * 
- * Strategy: Optimistic Locking with "Fully Linked" Visibility
- * 
- * To prevent hangs/deadlocks between Insert and Delete:
- * 1. Insert: Links Level 0 -> Links Upper Levels -> Sets fully_linked=true.
- * 2. Delete/Contains: If a node is found but !fully_linked, we treat it 
- *    as "not found" (effectively invisible). This prevents Delete from 
- *    spinning/waiting on a partially inserted node.
- * 
- * Safety:
- * - Use-After-Free is prevented by NOT freeing nodes until skiplist_destroy.
+ * Corrections applied:
+ * 1. Ghost Predecessor Fix: Delete now validates that predecessors are not marked.
+ * 2. Insert Logic: Allows inserting duplicate keys IF the existing node is marked.
+ * 3. Visibility: Uses fully_linked to prevent races on partially constructed nodes.
  */
 
 SkipList* skiplist_create_fine(void) {
@@ -30,7 +24,6 @@ SkipList* skiplist_create_fine(void) {
     omp_init_lock(&list->head->lock);
     omp_init_lock(&list->tail->lock);
 
-    // Sentinels are always visible
     atomic_store(&list->head->fully_linked, true);
     atomic_store(&list->tail->fully_linked, true);
     atomic_init(&list->head->marked, false);
@@ -49,7 +42,8 @@ SkipList* skiplist_create_fine(void) {
 
 /**
  * Optimistic Search
- * traverses without locks. Returns preds/succs.
+ * Traverses without locks. Returns preds/succs.
+ * Used by Insert, Delete, and Contains.
  */
 static void find_optimistic(SkipList* list, int key, Node** preds, Node** succs) {
     Node* pred = list->head;
@@ -67,8 +61,11 @@ static void find_optimistic(SkipList* list, int key, Node** preds, Node** succs)
     }
 }
 
+/**
+ * Validation: 
+ * Ensures Pred and Succ are not marked, and Pred physically points to Succ.
+ */
 static bool validate_link(Node* pred, Node* succ, int level) {
-    // Standard validation: neither is marked, and link is preserved
     return !atomic_load(&pred->marked) && 
            !atomic_load(&succ->marked) && 
            (atomic_load(&pred->next[level]) == succ);
@@ -81,31 +78,33 @@ bool skiplist_insert_fine(SkipList* list, int key, int value) {
     while (true) {
         find_optimistic(list, key, preds, succs);
         
-        // Check if key exists and is visible
+        // Check for duplicates
         Node* found = succs[0];
         if (found != list->tail && found->key == key) {
+            // FIX #2: If the node is marked, it's effectively dead.
+            // We should ALLOW insertion to proceed (placing new node before marked node).
+            // Only return false if it is fully valid and NOT marked.
             if (atomic_load(&found->fully_linked) && !atomic_load(&found->marked)) {
-                return false; // Already exists
+                return false; 
             }
-            // If it exists but !fully_linked or marked, we can't insert a duplicate key 
-            // until the previous one is fully gone or fully stable. 
-            // Simplified strategy: treat as "exists" to avoid duplicates during race.
-            return false;
         }
         
         // Lock Level 0 (Linearization Point)
         omp_set_lock(&preds[0]->lock);
         
+        // Standard validation
         if (!validate_link(preds[0], succs[0], 0)) {
             omp_unset_lock(&preds[0]->lock);
             continue; // Retry
         }
         
-        // Double check existence under lock
+        // Double check duplicates under lock
         found = succs[0];
         if (found != list->tail && found->key == key) {
-             omp_unset_lock(&preds[0]->lock);
-             return false;
+            if (atomic_load(&found->fully_linked) && !atomic_load(&found->marked)) {
+                omp_unset_lock(&preds[0]->lock);
+                return false;
+            }
         }
         
         int topLevel = random_level();
@@ -129,7 +128,7 @@ bool skiplist_insert_fine(SkipList* list, int key, int value) {
                 if (!validate_link(preds[i], succs[i], i)) {
                     omp_unset_lock(&preds[i]->lock);
                     
-                    // Robust Re-search: Start from head to avoid getting lost in deleted paths
+                    // Re-search required
                     Node* p = list->head;
                     Node* c = atomic_load(&p->next[i]);
                     while (c != list->tail && c->key < key) {
@@ -138,7 +137,7 @@ bool skiplist_insert_fine(SkipList* list, int key, int value) {
                     }
                     preds[i] = p;
                     succs[i] = c;
-                    continue; // Retry lock
+                    continue; 
                 }
                 
                 atomic_store(&newNode->next[i], succs[i]);
@@ -148,7 +147,6 @@ bool skiplist_insert_fine(SkipList* list, int key, int value) {
             }
         }
         
-        // Make visible to Delete/Contains
         atomic_store(&newNode->fully_linked, true);
         return true;
     }
@@ -162,7 +160,6 @@ bool skiplist_delete_fine(SkipList* list, int key) {
         find_optimistic(list, key, preds, succs);
         Node* victim = succs[0];
         
-        // Basic check
         if (victim == list->tail || victim->key != key) {
             return false;
         }
@@ -176,15 +173,12 @@ bool skiplist_delete_fine(SkipList* list, int key) {
         
         if (victim->key != key) {
             omp_unset_lock(&victim->lock);
-            continue; // Node changed identity (unlikely but safe)
+            continue; 
         }
 
-        // VISIBILITY CHECK:
-        // If the node is not fully linked, we treat it as "not found".
-        // This avoids the spin-wait livelock.
         if (!atomic_load(&victim->fully_linked)) {
             omp_unset_lock(&victim->lock);
-            return false; 
+            return false; // Treat as not found (avoid spinlock)
         }
         
         // Logically delete
@@ -196,11 +190,15 @@ bool skiplist_delete_fine(SkipList* list, int key) {
             while (true) {
                 omp_set_lock(&preds[i]->lock);
                 
-                // Validate predecessor
-                if (atomic_load(&preds[i]->next[i]) != victim) {
+                // FIX #1: Validate Predecessor is NOT MARKED
+                // If preds[i] is marked, we are unlinking from a dead node (Ghost Predecessor).
+                // This fails to remove victim from the live list.
+                if (atomic_load(&preds[i]->marked) || 
+                    atomic_load(&preds[i]->next[i]) != victim) {
+                    
                     omp_unset_lock(&preds[i]->lock);
                     
-                    // Robust Re-search
+                    // Re-search for a valid, live predecessor
                     Node* p = list->head;
                     Node* c = atomic_load(&p->next[i]);
                     while (c != list->tail && c->key < key) {
@@ -208,7 +206,7 @@ bool skiplist_delete_fine(SkipList* list, int key) {
                         c = atomic_load(&p->next[i]);
                     }
                     preds[i] = p;
-                    continue;
+                    continue; // Retry with new pred
                 }
                 
                 Node* next = atomic_load(&victim->next[i]);
@@ -219,7 +217,6 @@ bool skiplist_delete_fine(SkipList* list, int key) {
         }
         
         atomic_fetch_sub(&list->size, 1);
-        // Do not free()
         return true;
     }
 }
@@ -236,7 +233,6 @@ bool skiplist_contains_fine(SkipList* list, int key) {
         }
     }
     
-    // Strict visibility: Must be fully linked AND not marked
     return (curr != list->tail && 
             curr->key == key && 
             atomic_load(&curr->fully_linked) && 
