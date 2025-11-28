@@ -7,40 +7,42 @@
 #include <time.h>
 
 // ------------------------------------------------------------------------
-// Configuration & Macros
+// Tuning for High Contention
 // ------------------------------------------------------------------------
 #define MARK_BIT 1
 #define IS_MARKED(p)      ((uintptr_t)(p) & MARK_BIT)
 #define GET_UNMARKED(p)   ((Node*)((uintptr_t)(p) & ~MARK_BIT))
 #define GET_MARKED(p)     ((Node*)((uintptr_t)(p) | MARK_BIT))
 
-// Tune these for your specific hardware if needed
-#define BACKOFF_BASE_SPINS 4
-#define BACKOFF_MAX_SPINS  1024
-#define TOWER_BUILD_RETRIES 50
+// Optimization: In high contention, stop trying to build tall nodes.
+// A node at Level 0 is valid. Building higher levels is just optimization.
+// If we fail TWICE, we stop.
+#define TOWER_BUILD_RETRIES 2
 
-/**
- * Exponential Backoff Helper
- * 
- * When a CAS fails, we call this. It spins for a short duration
- * to reduce bus contention, allowing other threads to finish.
- */
+// Optimization: Backoff configuration
+// If we fail > 16 times, yield the CPU entirely (sleep)
+#define YIELD_THRESHOLD 16
+
 static void backoff(int *attempt) {
-    int spins = BACKOFF_BASE_SPINS << *attempt;
-    if (spins > BACKOFF_MAX_SPINS) spins = BACKOFF_MAX_SPINS;
+    (*attempt)++;
     
+    // If contention is extreme, yield the processor to let the winner finish.
+    if (*attempt > YIELD_THRESHOLD) {
+        sched_yield();
+        return;
+    }
+    
+    // Otherwise, exponential spin loop (CPU Pause)
+    int spins = 1 << *attempt; // 2, 4, 8, 16...
     for (volatile int i = 0; i < spins; i++) {
 #if defined(__x86_64__) || defined(__i386__)
         __builtin_ia32_pause();
 #elif defined(__aarch64__)
         __asm__ __volatile__("yield");
 #else
-        // Generic compiler barrier
         __asm__ __volatile__("" ::: "memory");
 #endif
     }
-    
-    (*attempt)++;
 }
 
 // ------------------------------------------------------------------------
@@ -84,11 +86,9 @@ retry:
                 while (IS_MARKED(succ)) {
                     Node* unmarked_succ = GET_UNMARKED(succ);
                     if (!atomic_compare_exchange_strong(&pred->next[level], &curr, unmarked_succ)) {
-                        backoff(&attempt); // Backoff before restarting
+                        backoff(&attempt); 
                         goto retry; 
                     }
-                    
-                    // CAS success, move forward
                     curr = unmarked_succ;
                     if (curr == NULL) break;
                     succ = atomic_load(&curr->next[level]);
@@ -125,24 +125,26 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
         int topLevel = random_level(); 
         Node* newNode = create_node(key, value, topLevel);
         
+        // Init next pointers
         for (int i = 0; i <= topLevel; i++) {
             atomic_store(&newNode->next[i], succs[i]);
         }
         
-        // Link Level 0
+        // Link Level 0 (The only mandatory link)
         Node* pred = preds[0];
         Node* succ = succs[0];
         
         if (!atomic_compare_exchange_strong(&pred->next[0], &succ, newNode)) {
             omp_destroy_lock(&newNode->lock);
             free(newNode);
-            backoff(&attempt); // Backoff on CAS failure
+            backoff(&attempt); 
             continue; 
         }
         
         atomic_fetch_add(&list->size, 1);
         
-        // Build Tower
+        // Build Tower (Performance Optimization)
+        // In high contention, we effectively skip this or stop early.
         for (int i = 1; i <= topLevel; i++) {
             int build_attempts = 0;
             
@@ -154,24 +156,26 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
                     break; // Success
                 }
                 
-                // If we fail too many times to link this level, we give up.
-                // It is better to have a slightly shorter node than to livelock the system.
-                // The node is already safely in Level 0, so it is correct.
-                if (++build_attempts > TOWER_BUILD_RETRIES) {
-                    break; 
+                // Aggressive give-up: If we failed twice, just stop.
+                // The node is linked at Level 0, so the list is correct.
+                // We sacrifice lookup speed slightly for insert throughput.
+                if (++build_attempts >= TOWER_BUILD_RETRIES) {
+                    goto stop_building; 
                 }
                 
+                // Re-find path
                 find(list, key, preds, succs);
                 
                 if (IS_MARKED(atomic_load(&newNode->next[0]))) {
-                    return true; 
+                    goto stop_building; // We are dead
                 }
                 
                 atomic_store(&newNode->next[i], succs[i]);
-                // No backoff here, finding is expensive enough
+                cpu_relax(); // Light pause
             }
         }
         
+    stop_building:
         atomic_store(&newNode->fully_linked, true);
         return true;
     }
@@ -190,24 +194,29 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
         
         victim = succs[0];
         
-        // Logical Deletion
+        // Logical Deletion (Marking)
+        // Mark Level 0 first? No, Harris marks top-down usually, 
+        // but for performance, we need Level 0 marked to define "deleted".
+        // We will try to mark all levels to help 'find' performance.
         for (int i = victim->topLevel; i >= 0; i--) {
             while (true) {
                 Node* succ = atomic_load(&victim->next[i]);
                 
                 if (IS_MARKED(succ)) {
                     if (i == 0) return false; // Already deleted
-                    break; // Already marked at this level, proceed to next
+                    break; 
                 }
                 
                 Node* marked_succ = GET_MARKED(succ);
                 if (atomic_compare_exchange_strong(&victim->next[i], &succ, marked_succ)) {
-                    break; // Successfully marked
+                    break; // Success
                 }
                 
-                // CAS failed.
-                // If Level 0, we MUST retry until success or we discover it's already deleted.
-                // If Upper Level, we also retry to ensure consistent state for 'find' helper.
+                // Optimization: If upper level mark fails, ignore it and move down.
+                // We only truly care about Level 0.
+                if (i > 0) break;
+                
+                // Level 0 MUST succeed
                 backoff(&attempt);
             }
         }
