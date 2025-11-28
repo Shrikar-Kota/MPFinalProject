@@ -4,23 +4,12 @@
 #include <limits.h>
 #include <stdatomic.h>
 #include <sched.h>
-#include <time.h>
 
-// ------------------------------------------------------------------------
-// Configuration
-// ------------------------------------------------------------------------
-// IS_MARKED, GET_UNMARKED are in skiplist_common.h
-
+// Backoff configuration
 #define BACKOFF_BASE_SPINS 1
 #define BACKOFF_MAX_SPINS  4096
-
-// CRITICAL: Yield very early. 
-// At 8+ threads, spinning burns cycles that block the thread holding the lock/state.
-#define YIELD_THRESHOLD 3 
-
-// CRITICAL: Stop building towers immediately if blocked.
-// A node at Level 0 is valid. A hung thread is not.
-#define TOWER_BUILD_RETRIES 2
+#define YIELD_THRESHOLD 3
+#define MAX_RETRIES 100
 
 static inline void cpu_relax() {
 #if defined(__x86_64__) || defined(__i386__)
@@ -38,16 +27,12 @@ static void backoff(int *attempt) {
         sched_yield();
         return;
     }
-    int spins = BACKOFF_BASE_SPINS << *attempt;
+    int spins = BACKOFF_BASE_SPINS << (*attempt);
     if (spins > BACKOFF_MAX_SPINS) spins = BACKOFF_MAX_SPINS;
     for (volatile int i = 0; i < spins; i++) {
         cpu_relax();
     }
 }
-
-// ------------------------------------------------------------------------
-// Lock-Free Implementation
-// ------------------------------------------------------------------------
 
 SkipList* skiplist_create_lockfree(void) {
     SkipList* list = (SkipList*)malloc(sizeof(SkipList));
@@ -67,52 +52,41 @@ SkipList* skiplist_create_lockfree(void) {
 }
 
 static bool find(SkipList* list, int key, Node** preds, Node** succs) {
-    int bottomLevel = 0;
-    int attempt = 0;
-    
 retry:
-    while (true) {
-        Node* pred = list->head;
+    Node* pred = list->head;
+    
+    for (int level = list->maxLevel; level >= 0; level--) {
+        Node* curr = GET_UNMARKED(atomic_load(&pred->next[level]));
         
-        for (int level = list->maxLevel; level >= bottomLevel; level--) {
-            Node* curr = GET_UNMARKED(atomic_load(&pred->next[level]));
+        while (curr != list->tail) {
+            Node* succ = atomic_load(&curr->next[level]);
             
-            while (true) {
-                if (curr == NULL) break; 
-
-                Node* succ = atomic_load(&curr->next[level]);
-                
-                // Helping: Check if marked
-                while (IS_MARKED(succ)) {
-                    Node* unmarked_succ = GET_UNMARKED(succ);
-                    
-                    if (!atomic_compare_exchange_strong(&pred->next[level], &curr, unmarked_succ)) {
-                        backoff(&attempt); 
-                        goto retry; 
-                    }
-                    
-                    curr = unmarked_succ;
-                    if (curr == NULL) break;
-                    succ = atomic_load(&curr->next[level]);
+            // Physical helping
+            while (IS_MARKED(succ)) {
+                Node* unmarked_succ = GET_UNMARKED(succ);
+                if (!atomic_compare_exchange_strong(&pred->next[level], &curr, unmarked_succ)) {
+                    goto retry;
                 }
-                
-                if (curr == NULL) break;
-                
-                // Traversal
-                if (curr != list->tail && curr->key < key) {
-                    pred = curr;
-                    curr = GET_UNMARKED(succ);
-                } else {
-                    break; 
-                }
+                curr = unmarked_succ;
+                if (curr == list->tail) break;
+                succ = atomic_load(&curr->next[level]);
             }
             
-            preds[level] = pred;
-            succs[level] = curr;
+            if (curr == list->tail) break;
+            
+            if (curr->key < key) {
+                pred = curr;
+                curr = GET_UNMARKED(succ);
+            } else {
+                break;
+            }
         }
         
-        return (succs[bottomLevel] != list->tail && succs[bottomLevel]->key == key);
+        preds[level] = pred;
+        succs[level] = curr;
     }
+    
+    return (succs[0] != list->tail && succs[0]->key == key);
 }
 
 bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
@@ -120,102 +94,104 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
     Node* succs[MAX_LEVEL + 1];
     int attempt = 0;
     
-    while (true) {
+    while (attempt++ < MAX_RETRIES) {
         if (find(list, key, preds, succs)) {
+            // FIX: Check if found node is marked (zombie)
             Node* found = succs[0];
-            if (!IS_MARKED(atomic_load(&found->next[0]))) {
-                return false; // Key exists
+            Node* next = atomic_load(&found->next[0]);
+            if (!IS_MARKED(next)) {
+                return false; // Live node exists
             }
+            // Zombie found, continue to insert
         }
         
-        int topLevel = random_level(); 
+        int topLevel = random_level();
         Node* newNode = create_node(key, value, topLevel);
         
+        // Initialize all next pointers
         for (int i = 0; i <= topLevel; i++) {
             atomic_store(&newNode->next[i], succs[i]);
         }
         
+        // Link at level 0 (linearization point)
         Node* pred = preds[0];
         Node* succ = succs[0];
         
         if (!atomic_compare_exchange_strong(&pred->next[0], &succ, newNode)) {
             omp_destroy_lock(&newNode->lock);
             free(newNode);
-            backoff(&attempt); 
-            continue; 
+            backoff(&attempt);
+            continue;
         }
         
         atomic_fetch_add(&list->size, 1);
         
+        // Build tower with validation
         for (int i = 1; i <= topLevel; i++) {
-            int build_attempts = 0;
+            int tower_attempts = 0;
             
-            while (true) {
+            while (tower_attempts++ < 3) {
+                // FIX: Check if node was deleted while building tower
+                Node* curr_next = atomic_load(&newNode->next[0]);
+                if (IS_MARKED(curr_next)) {
+                    // Node was deleted, stop building
+                    goto tower_done;
+                }
+                
                 pred = preds[i];
                 succ = succs[i];
                 
                 if (atomic_compare_exchange_strong(&pred->next[i], &succ, newNode)) {
-                    break; 
+                    break; // Success at this level
                 }
                 
-                if (++build_attempts >= TOWER_BUILD_RETRIES) {
-                    goto stop_building; 
-                }
-                
+                // FIX: Refresh preds/succs AND update newNode's next pointer
                 find(list, key, preds, succs);
-                
-                if (IS_MARKED(atomic_load(&newNode->next[0]))) {
-                    goto stop_building; 
-                }
-                
                 atomic_store(&newNode->next[i], succs[i]);
-                cpu_relax();
             }
         }
         
-    stop_building:
+    tower_done:
         atomic_store(&newNode->fully_linked, true);
         return true;
     }
+    
+    return false; // Max retries exceeded
 }
 
 bool skiplist_delete_lockfree(SkipList* list, int key) {
     Node* preds[MAX_LEVEL + 1];
     Node* succs[MAX_LEVEL + 1];
-    Node* victim;
     int attempt = 0;
     
-    while (true) {
+    while (attempt++ < MAX_RETRIES) {
         if (!find(list, key, preds, succs)) {
-            return false; 
+            return false;
         }
         
-        victim = succs[0];
+        Node* victim = succs[0];
         
+        // Mark from top to bottom
         for (int i = victim->topLevel; i >= 0; i--) {
-            while (true) {
-                Node* succ = atomic_load(&victim->next[i]);
-                
+            Node* succ;
+            do {
+                succ = atomic_load(&victim->next[i]);
                 if (IS_MARKED(succ)) {
-                    if (i == 0) return false; 
-                    break; 
+                    // Already marked at this level
+                    if (i == 0) return false; // Someone else deleted
+                    break;
                 }
-                
-                Node* marked_succ = GET_MARKED(succ);
-                if (atomic_compare_exchange_strong(&victim->next[i], &succ, marked_succ)) {
-                    break; 
-                }
-                
-                if (i > 0) break;
-                
-                backoff(&attempt);
-            }
+            } while (!atomic_compare_exchange_strong(&victim->next[i], &succ, GET_MARKED(succ)));
         }
         
+        // Physical removal (helping)
         find(list, key, preds, succs);
+        
         atomic_fetch_sub(&list->size, 1);
         return true;
     }
+    
+    return false;
 }
 
 bool skiplist_contains_lockfree(SkipList* list, int key) {
@@ -224,13 +200,13 @@ bool skiplist_contains_lockfree(SkipList* list, int key) {
     for (int level = list->maxLevel; level >= 0; level--) {
         Node* curr = GET_UNMARKED(atomic_load(&pred->next[level]));
         
-        while (true) {
-            if (curr == NULL || curr == list->tail) break;
+        while (curr != list->tail) {
             Node* succ = atomic_load(&curr->next[level]);
             
+            // Skip marked nodes
             while (IS_MARKED(succ)) {
                 curr = GET_UNMARKED(succ);
-                if (curr == NULL || curr == list->tail) goto next_level;
+                if (curr == list->tail) goto next_level;
                 succ = atomic_load(&curr->next[level]);
             }
             
@@ -245,7 +221,6 @@ bool skiplist_contains_lockfree(SkipList* list, int key) {
     }
     
     Node* curr = GET_UNMARKED(atomic_load(&pred->next[0]));
-    
     return (curr != list->tail && 
             curr->key == key && 
             !IS_MARKED(atomic_load(&curr->next[0])));
