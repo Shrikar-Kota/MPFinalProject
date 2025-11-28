@@ -7,18 +7,13 @@
 #include <time.h>
 
 // ------------------------------------------------------------------------
-// Configuration & Macros
+// Configuration
 // ------------------------------------------------------------------------
-#define MARK_BIT 1
-#define IS_MARKED(p)      ((uintptr_t)(p) & MARK_BIT)
-#define GET_UNMARKED(p)   ((Node*)((uintptr_t)(p) & ~MARK_BIT))
-#define GET_MARKED(p)     ((Node*)((uintptr_t)(p) | MARK_BIT))
+// Macros IS_MARKED, GET_UNMARKED, etc. are now in skiplist_common.h
 
-// Backoff Configuration
 #define BACKOFF_BASE_SPINS 1
 #define BACKOFF_MAX_SPINS  2048
 #define YIELD_THRESHOLD 20
-// Tower retries: high enough to build good structures, low enough to not hang forever
 #define TOWER_BUILD_RETRIES 50 
 
 static inline void cpu_relax() {
@@ -85,15 +80,11 @@ retry:
                 while (IS_MARKED(succ)) {
                     Node* unmarked_succ = GET_UNMARKED(succ);
                     
-                    // Attempt physical removal
                     if (!atomic_compare_exchange_strong(&pred->next[level], &curr, unmarked_succ)) {
-                        // CAS Failed: Structure changed. 
-                        // Restart from Head (Safest approach for correctness)
                         backoff(&attempt); 
                         goto retry; 
                     }
                     
-                    // CAS Success: Node removed. Move next.
                     curr = unmarked_succ;
                     if (curr == NULL) break;
                     succ = atomic_load(&curr->next[level]);
@@ -101,7 +92,6 @@ retry:
                 
                 if (curr == NULL) break;
                 
-                // Standard Traversal
                 if (curr != list->tail && curr->key < key) {
                     pred = curr;
                     curr = GET_UNMARKED(succ);
@@ -135,7 +125,6 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
             atomic_store(&newNode->next[i], succs[i]);
         }
         
-        // Link Level 0 (Linearization Point)
         Node* pred = preds[0];
         Node* succ = succs[0];
         
@@ -148,7 +137,6 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
         
         atomic_fetch_add(&list->size, 1);
         
-        // Build Tower (Best Effort)
         for (int i = 1; i <= topLevel; i++) {
             int build_attempts = 0;
             
@@ -160,7 +148,6 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
                     break; 
                 }
                 
-                // If we struggle to build, stop.
                 if (++build_attempts >= TOWER_BUILD_RETRIES) {
                     goto stop_building; 
                 }
@@ -195,7 +182,6 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
         
         victim = succs[0];
         
-        // Logical Deletion
         for (int i = victim->topLevel; i >= 0; i--) {
             while (true) {
                 Node* succ = atomic_load(&victim->next[i]);
@@ -210,16 +196,13 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
                     break; 
                 }
                 
-                // If upper level fails, ignore and move down.
                 if (i > 0) break;
                 
                 backoff(&attempt);
             }
         }
         
-        // Physical Cleanup
         find(list, key, preds, succs);
-        
         atomic_fetch_sub(&list->size, 1);
         return true;
     }

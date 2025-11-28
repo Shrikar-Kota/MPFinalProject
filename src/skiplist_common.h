@@ -11,12 +11,21 @@
 #define P_FACTOR 0.5
 #define CACHE_LINE_SIZE 64
 
+// ------------------------------------------------------------------------
+// Pointer Marking Macros (Harris Algorithm)
+// Moved here so utils.c can correctly validate/print lock-free lists
+// ------------------------------------------------------------------------
+#define MARK_BIT 1
+#define IS_MARKED(p)      ((uintptr_t)(p) & MARK_BIT)
+#define GET_UNMARKED(p)   ((Node*)((uintptr_t)(p) & ~MARK_BIT))
+#define GET_MARKED(p)     ((Node*)((uintptr_t)(p) | MARK_BIT))
+
 // Node structure for skip list
 typedef struct Node {
     int key;
     int value;
     int topLevel;
-    _Atomic(bool) marked;  // For logical deletion in lock-free version
+    _Atomic(bool) marked;  // For logical deletion in fine-grained
     _Atomic(bool) fully_linked;  // True when all levels are linked
     _Atomic(struct Node*) next[MAX_LEVEL + 1];
     omp_lock_t lock;  // For fine-grained locking version
