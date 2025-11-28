@@ -9,12 +9,17 @@
 // ------------------------------------------------------------------------
 // Configuration
 // ------------------------------------------------------------------------
-// Macros IS_MARKED, GET_UNMARKED, etc. are now in skiplist_common.h
+// IS_MARKED, GET_UNMARKED, etc. are in skiplist_common.h
 
 #define BACKOFF_BASE_SPINS 1
 #define BACKOFF_MAX_SPINS  2048
 #define YIELD_THRESHOLD 20
-#define TOWER_BUILD_RETRIES 50 
+
+// CRITICAL FIX FOR 16-THREAD HANG:
+// Limit the attempts to build upper levels. 
+// If we fail twice, we stop. This prevents threads from fighting forever 
+// over structural pointers, eliminating the Livelock.
+#define TOWER_BUILD_RETRIES 2
 
 static inline void cpu_relax() {
 #if defined(__x86_64__) || defined(__i386__)
@@ -80,11 +85,17 @@ retry:
                 while (IS_MARKED(succ)) {
                     Node* unmarked_succ = GET_UNMARKED(succ);
                     
+                    // Attempt physical removal
                     if (!atomic_compare_exchange_strong(&pred->next[level], &curr, unmarked_succ)) {
+                        // CAS Failed.
+                        // We use the Standard Harris restart mechanism here.
+                        // It is safer for correctness/scalability than the "Smart" recovery.
+                        // The backoff() prevents the livelock.
                         backoff(&attempt); 
                         goto retry; 
                     }
                     
+                    // Success. Move forward.
                     curr = unmarked_succ;
                     if (curr == NULL) break;
                     succ = atomic_load(&curr->next[level]);
@@ -125,6 +136,7 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
             atomic_store(&newNode->next[i], succs[i]);
         }
         
+        // Link Level 0 (Linearization Point)
         Node* pred = preds[0];
         Node* succ = succs[0];
         
@@ -137,6 +149,7 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
         
         atomic_fetch_add(&list->size, 1);
         
+        // Build Tower (Performance Optimized)
         for (int i = 1; i <= topLevel; i++) {
             int build_attempts = 0;
             
@@ -148,6 +161,9 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
                     break; 
                 }
                 
+                // CRITICAL FIX: Give up quickly.
+                // If we can't link Level 'i' in 2 tries, we stop building.
+                // This frees up the thread to do other work and stops the livelock.
                 if (++build_attempts >= TOWER_BUILD_RETRIES) {
                     goto stop_building; 
                 }
@@ -182,6 +198,7 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
         
         victim = succs[0];
         
+        // Logical Deletion
         for (int i = victim->topLevel; i >= 0; i--) {
             while (true) {
                 Node* succ = atomic_load(&victim->next[i]);
@@ -196,13 +213,16 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
                     break; 
                 }
                 
+                // If upper level fails, ignore and move down.
                 if (i > 0) break;
                 
                 backoff(&attempt);
             }
         }
         
+        // Physical Cleanup
         find(list, key, preds, succs);
+        
         atomic_fetch_sub(&list->size, 1);
         return true;
     }
