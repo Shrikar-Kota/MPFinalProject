@@ -14,12 +14,11 @@
 #define BACKOFF_BASE_SPINS 1
 #define BACKOFF_MAX_SPINS  2048
 
-// CRITICAL: Low yield threshold for high threads (16+)
-#define YIELD_THRESHOLD 5 
+// Aggressive Yielding to clear convoys at 16 threads
+#define YIELD_THRESHOLD 4 
 
-// CRITICAL: Stop building towers instantly if there is contention.
-// A flat node is better than a hanging system.
-#define TOWER_BUILD_RETRIES 2 
+// Restoration of tower building for O(log N) search performance
+#define TOWER_BUILD_RETRIES 50 
 
 static inline void cpu_relax() {
 #if defined(__x86_64__) || defined(__i386__)
@@ -65,11 +64,15 @@ SkipList* skiplist_create_lockfree(void) {
     return list;
 }
 
+/**
+ * Smart Find with Local Recovery.
+ * Essential for >8 threads to prevent "Restart from Head" thrashing.
+ */
 static bool find(SkipList* list, int key, Node** preds, Node** succs) {
     int bottomLevel = 0;
     int attempt = 0;
     
-retry:
+retry_head:
     while (true) {
         Node* pred = list->head;
         
@@ -87,11 +90,21 @@ retry:
                     
                     // Attempt physical removal
                     if (!atomic_compare_exchange_strong(&pred->next[level], &curr, unmarked_succ)) {
-                        // CAS Failed. 
-                        // Standard Harris behavior: Restart from HEAD.
-                        // This prevents getting stuck in local loops with bad pointers.
-                        backoff(&attempt); 
-                        goto retry; 
+                        // CAS FAILED.
+                        // Instead of restarting from head, check if 'pred' is still valid.
+                        Node* ref = atomic_load(&pred->next[level]);
+                        
+                        if (IS_MARKED(ref)) {
+                            // Pred is dead. Must restart from Head.
+                            backoff(&attempt);
+                            goto retry_head;
+                        }
+                        
+                        // Pred is alive. Update curr and try to move forward.
+                        curr = GET_UNMARKED(ref);
+                        if (curr == NULL) break;
+                        succ = atomic_load(&curr->next[level]);
+                        continue; 
                     }
                     
                     // Success. Move forward.
@@ -102,6 +115,7 @@ retry:
                 
                 if (curr == NULL) break;
                 
+                // Traversal
                 if (curr != list->tail && curr->key < key) {
                     pred = curr;
                     curr = GET_UNMARKED(succ);
@@ -125,12 +139,12 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
     
     while (true) {
         if (find(list, key, preds, succs)) {
-            // Check for Zombie node
+            // Check for Zombie (Marked) node
             Node* found = succs[0];
             if (!IS_MARKED(atomic_load(&found->next[0]))) {
                 return false; // Key exists and is alive
             }
-            // It is marked (Zombie). Ignore it and insert.
+            // It is marked. Ignore it and insert.
         }
         
         int topLevel = random_level(); 
@@ -165,7 +179,7 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
                     break; 
                 }
                 
-                // CRITICAL LIMIT: Give up almost immediately.
+                // Retry enough times to build a good structure
                 if (++build_attempts >= TOWER_BUILD_RETRIES) {
                     goto stop_building; 
                 }
@@ -200,7 +214,7 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
         
         victim = succs[0];
         
-        // Logical Deletion - Mark ALL levels
+        // Logical Deletion
         for (int i = victim->topLevel; i >= 0; i--) {
             while (true) {
                 Node* succ = atomic_load(&victim->next[i]);
@@ -215,12 +229,9 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
                     break; 
                 }
                 
-                // Retry Level 0 aggressively, backoff on others
-                if (i > 0) backoff(&attempt); // Soft retry for upper levels
-                else backoff(&attempt);       // Hard retry for level 0
+                if (i > 0) break; // Upper levels: best effort
                 
-                // If Upper level loop spins too long, we could break, 
-                // but marking all is safer for 'find' performance.
+                backoff(&attempt); // Level 0: Must succeed
             }
         }
         
