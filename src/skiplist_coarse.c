@@ -1,55 +1,59 @@
-/**
- * Coarse-Grained Locking Skip List
- * 
- * Implementation Strategy:
- * - Single global lock protects all operations
- * - Simple and provably correct
- * - Baseline for performance comparison
- * 
- * Correctness: Sequential consistency guaranteed by global mutex
- * Performance: Limited scalability due to serialization
- */
-
 #include "skiplist_common.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <limits.h>
 
+/**
+ * Coarse-Grained Lock Skip List
+ * 
+ * Logic:
+ * 1. Acquire global lock.
+ * 2. Perform operation (Search/Insert/Delete).
+ * 3. Release global lock.
+ * 
+ * Pros: Simple, easy to prove correct (sequential consistency).
+ * Cons: Zero concurrency. Readers block writers, writers block readers.
+ */
+
 SkipList* skiplist_create_coarse(void) {
     SkipList* list = (SkipList*)malloc(sizeof(SkipList));
     if (!list) {
-        fprintf(stderr, "Failed to allocate skip list\n");
+        perror("Failed to allocate skip list");
         exit(1);
     }
     
+    // Create sentinels
     list->head = create_node(INT_MIN, 0, MAX_LEVEL);
     list->tail = create_node(INT_MAX, 0, MAX_LEVEL);
+    
+    // Using static max level for simplicity
     list->maxLevel = MAX_LEVEL;
     atomic_init(&list->size, 0);
+    
+    // Initialize the Global Lock
     omp_init_lock(&list->lock);
     
-    // Initialize sentinel nodes
+    // Link head to tail
     for (int i = 0; i <= MAX_LEVEL; i++) {
         atomic_store(&list->head->next[i], list->tail);
         atomic_store(&list->tail->next[i], NULL);
     }
+    
+    // Optional: Mark sentinels as fully linked (consistency with other impls)
     atomic_store(&list->head->fully_linked, true);
     atomic_store(&list->tail->fully_linked, true);
     
     return list;
 }
 
-/**
- * Insert operation
- * Linearization point: When global lock is held and node is linked
- */
 bool skiplist_insert_coarse(SkipList* list, int key, int value) {
+    // 1. Acquire Global Lock
     omp_set_lock(&list->lock);
     
-    // Search phase - find predecessors at all levels
     Node* preds[MAX_LEVEL + 1];
     Node* pred = list->head;
     
+    // 2. Search for position
     for (int level = list->maxLevel; level >= 0; level--) {
         Node* curr = atomic_load(&pred->next[level]);
         
@@ -60,19 +64,21 @@ bool skiplist_insert_coarse(SkipList* list, int key, int value) {
         
         preds[level] = pred;
         
-        // Check for duplicate at level 0
+        // Check for duplicates
         if (level == 0 && curr != list->tail && curr->key == key) {
             omp_unset_lock(&list->lock);
             return false;
         }
     }
     
-    // Create new node with random level
+    // 3. Create Node
+    // Note: Allocating inside the lock increases critical section time,
+    // but ensures we don't allocate if the key already exists.
     int topLevel = random_level();
     Node* newNode = create_node(key, value, topLevel);
     atomic_store(&newNode->fully_linked, true);
     
-    // Link at all levels atomically (protected by global lock)
+    // 4. Link Node
     for (int level = 0; level <= topLevel; level++) {
         Node* succ = atomic_load(&preds[level]->next[level]);
         atomic_store(&newNode->next[level], succ);
@@ -80,22 +86,20 @@ bool skiplist_insert_coarse(SkipList* list, int key, int value) {
     }
     
     atomic_fetch_add(&list->size, 1);
+    
+    // 5. Release Lock
     omp_unset_lock(&list->lock);
     return true;
 }
 
-/**
- * Delete operation
- * Linearization point: When global lock is held and node is unlinked
- */
 bool skiplist_delete_coarse(SkipList* list, int key) {
     omp_set_lock(&list->lock);
     
-    // Search for victim
     Node* preds[MAX_LEVEL + 1];
     Node* pred = list->head;
     Node* victim = NULL;
     
+    // Search
     for (int level = list->maxLevel; level >= 0; level--) {
         Node* curr = atomic_load(&pred->next[level]);
         
@@ -111,12 +115,12 @@ bool skiplist_delete_coarse(SkipList* list, int key) {
                 victim = curr;
             } else {
                 omp_unset_lock(&list->lock);
-                return false;
+                return false; // Not found
             }
         }
     }
     
-    // Unlink from all levels
+    // Unlink
     for (int level = 0; level <= victim->topLevel; level++) {
         Node* succ = atomic_load(&victim->next[level]);
         atomic_store(&preds[level]->next[level], succ);
@@ -125,48 +129,45 @@ bool skiplist_delete_coarse(SkipList* list, int key) {
     atomic_fetch_sub(&list->size, 1);
     omp_unset_lock(&list->lock);
     
-    // Safe to free - no concurrent access possible
-    omp_destroy_lock(&victim->lock);
+    // Safe to free outside lock because node is now unreachable
+    // and we are not using lock-free optimistic readers.
+    omp_destroy_lock(&victim->lock); // Clean up the unused node lock
     free(victim);
     
     return true;
 }
 
-/**
- * Contains operation
- * Linearization point: When global lock is held and search completes
- */
 bool skiplist_contains_coarse(SkipList* list, int key) {
+    // Crucial: Readers must acquire lock in Coarse-Grained
+    // Otherwise a writer could free a node while we are traversing it.
     omp_set_lock(&list->lock);
     
-    Node* curr = list->head;
+    Node* pred = list->head;
     
-    // Skip list search from top level down
     for (int level = list->maxLevel; level >= 0; level--) {
-        Node* next = atomic_load(&curr->next[level]);
+        Node* curr = atomic_load(&pred->next[level]);
         
-        while (next != list->tail && next->key < key) {
-            curr = next;
-            next = atomic_load(&curr->next[level]);
-        }
-        
-        if (level == 0) {
-            bool found = (next != list->tail && next->key == key);
-            omp_unset_lock(&list->lock);
-            return found;
+        while (curr != list->tail && curr->key < key) {
+            pred = curr;
+            curr = atomic_load(&pred->next[level]);
         }
     }
     
+    // Check level 0
+    Node* curr = atomic_load(&pred->next[0]);
+    bool found = (curr != list->tail && curr->key == key);
+    
     omp_unset_lock(&list->lock);
-    return false;
+    return found;
 }
 
 void skiplist_destroy_coarse(SkipList* list) {
+    // No lock needed if we assume only one thread calls destroy
     Node* curr = list->head;
     
     while (curr != NULL) {
         Node* next = atomic_load(&curr->next[0]);
-        omp_destroy_lock(&curr->lock);
+        omp_destroy_lock(&curr->lock); // Clean up unused node locks
         free(curr);
         curr = next;
     }
