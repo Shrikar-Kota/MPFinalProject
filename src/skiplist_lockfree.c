@@ -7,23 +7,20 @@
 #include <time.h>
 
 // ------------------------------------------------------------------------
-// Configuration & Macros
+// Configuration
 // ------------------------------------------------------------------------
 // IS_MARKED, GET_UNMARKED are in skiplist_common.h
 
-// BACKOFF TUNING
-// 1 spin base: React fast to low contention.
-// 2048 spin max: Don't sleep too long.
-// Yield at 12: If we fail 12 times, the bus is jammed. Yield to OS.
 #define BACKOFF_BASE_SPINS 1
-#define BACKOFF_MAX_SPINS  2048
-#define YIELD_THRESHOLD    12
+#define BACKOFF_MAX_SPINS  4096
 
-// TOWER BUILDING
-// 50 Retries: Enough to build O(log N) structures 99% of the time.
-// Prevents the "Flat List" performance collapse.
-// Prevents the "Infinite Loop" hang.
-#define TOWER_BUILD_RETRIES 50 
+// CRITICAL: Yield very early. 
+// At 8+ threads, spinning burns cycles that block the thread holding the lock/state.
+#define YIELD_THRESHOLD 3 
+
+// CRITICAL: Stop building towers immediately if blocked.
+// A node at Level 0 is valid. A hung thread is not.
+#define TOWER_BUILD_RETRIES 2
 
 static inline void cpu_relax() {
 #if defined(__x86_64__) || defined(__i386__)
@@ -37,15 +34,12 @@ static inline void cpu_relax() {
 
 static void backoff(int *attempt) {
     (*attempt)++;
-    
     if (*attempt > YIELD_THRESHOLD) {
         sched_yield();
         return;
     }
-
     int spins = BACKOFF_BASE_SPINS << *attempt;
     if (spins > BACKOFF_MAX_SPINS) spins = BACKOFF_MAX_SPINS;
-    
     for (volatile int i = 0; i < spins; i++) {
         cpu_relax();
     }
@@ -73,11 +67,9 @@ SkipList* skiplist_create_lockfree(void) {
 }
 
 /**
- * Standard Harris Find.
- * - Traverses top-down.
- * - Helps physically delete marked nodes.
- * - Restarts from Head on CAS failure (Correctness Guarantee).
- * - Uses Backoff to prevent Livelock.
+ * Robust Harris Find.
+ * Uses restart-from-head (safest) but relies on aggressive backoff
+ * to prevent livelock during high contention.
  */
 static bool find(SkipList* list, int key, Node** preds, Node** succs) {
     int bottomLevel = 0;
@@ -91,24 +83,23 @@ retry:
             Node* curr = GET_UNMARKED(atomic_load(&pred->next[level]));
             
             while (true) {
-                if (curr == NULL) break; // Should not happen with sentinels
+                if (curr == NULL) break; 
 
                 Node* succ = atomic_load(&curr->next[level]);
                 
-                // Helping: Check if current node is marked
+                // Helping: Check if marked
                 while (IS_MARKED(succ)) {
                     Node* unmarked_succ = GET_UNMARKED(succ);
                     
                     // Attempt physical removal
                     if (!atomic_compare_exchange_strong(&pred->next[level], &curr, unmarked_succ)) {
-                        // CAS Failed: The world changed.
-                        // Backoff and restart from the top.
-                        // This is slower than local recovery but 100% bug-free.
+                        // CAS Failed. The list structure changed.
+                        // Backoff aggressively and restart.
                         backoff(&attempt); 
                         goto retry; 
                     }
                     
-                    // Success: Node removed. Update traversal pointers.
+                    // Success. Move forward.
                     curr = unmarked_succ;
                     if (curr == NULL) break;
                     succ = atomic_load(&curr->next[level]);
@@ -116,12 +107,12 @@ retry:
                 
                 if (curr == NULL) break;
                 
-                // Standard Traversal
+                // Traversal
                 if (curr != list->tail && curr->key < key) {
                     pred = curr;
                     curr = GET_UNMARKED(succ);
                 } else {
-                    break; // Go down
+                    break; 
                 }
             }
             
@@ -140,37 +131,38 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
     
     while (true) {
         if (find(list, key, preds, succs)) {
-            // Key found. Check if it's a "Zombie" (marked but not removed).
+            // Found a node. Check if it is a Zombie.
             Node* found = succs[0];
             if (!IS_MARKED(atomic_load(&found->next[0]))) {
-                return false; // Key exists and is alive.
+                return false; // Key exists and is alive
             }
-            // Key is marked (Zombie). Treat as deleted, proceed to insert.
+            // It is marked (Zombie). 
+            // The standard algorithm will insert the new node *before* the zombie 
+            // (since the zombie key == new key, and search stops at >=).
+            // This is acceptable behavior; the zombie will be cleaned up later.
         }
         
         int topLevel = random_level(); 
         Node* newNode = create_node(key, value, topLevel);
         
-        // Initialize next pointers
         for (int i = 0; i <= topLevel; i++) {
             atomic_store(&newNode->next[i], succs[i]);
         }
         
-        // Linearization Point: Link at Level 0
+        // Link Level 0 (Linearization Point)
         Node* pred = preds[0];
         Node* succ = succs[0];
         
         if (!atomic_compare_exchange_strong(&pred->next[0], &succ, newNode)) {
-            // Failed. Someone else modified Level 0.
             omp_destroy_lock(&newNode->lock);
             free(newNode);
             backoff(&attempt); 
-            continue; // Retry entire insert
+            continue; 
         }
         
         atomic_fetch_add(&list->size, 1);
         
-        // Build Tower (Best Effort)
+        // Build Tower (Fail-Fast)
         for (int i = 1; i <= topLevel; i++) {
             int build_attempts = 0;
             
@@ -179,23 +171,21 @@ bool skiplist_insert_lockfree(SkipList* list, int key, int value) {
                 succ = succs[i];
                 
                 if (atomic_compare_exchange_strong(&pred->next[i], &succ, newNode)) {
-                    break; // Success
+                    break; 
                 }
                 
-                // If we struggle to link upper levels, stop.
+                // If we fail TWICE, we stop. 
+                // Don't clog the bus trying to build a perfect tower.
                 if (++build_attempts >= TOWER_BUILD_RETRIES) {
                     goto stop_building; 
                 }
                 
-                // References are stale, re-find.
                 find(list, key, preds, succs);
                 
-                // If we were deleted while building, stop.
                 if (IS_MARKED(atomic_load(&newNode->next[0]))) {
                     goto stop_building; 
                 }
                 
-                // Update target and retry
                 atomic_store(&newNode->next[i], succs[i]);
                 cpu_relax();
             }
@@ -215,7 +205,7 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
     
     while (true) {
         if (!find(list, key, preds, succs)) {
-            return false; // Not found
+            return false; 
         }
         
         victim = succs[0];
@@ -226,25 +216,24 @@ bool skiplist_delete_lockfree(SkipList* list, int key) {
                 Node* succ = atomic_load(&victim->next[i]);
                 
                 if (IS_MARKED(succ)) {
-                    if (i == 0) return false; // Already deleted
+                    if (i == 0) return false; 
                     break; 
                 }
                 
                 Node* marked_succ = GET_MARKED(succ);
                 if (atomic_compare_exchange_strong(&victim->next[i], &succ, marked_succ)) {
-                    break; // Success
+                    break; 
                 }
                 
-                // Optimization: Fail-fast on upper levels.
-                // We only strictly need Level 0 marked.
+                // Fail-Fast: If Upper Level mark fails, ignore it and move down.
                 if (i > 0) break;
                 
-                // Level 0 must succeed.
+                // Level 0 Must Succeed (or fail if already marked)
                 backoff(&attempt);
             }
         }
         
-        // Physical Cleanup (Helping self)
+        // Physical Cleanup
         find(list, key, preds, succs);
         
         atomic_fetch_sub(&list->size, 1);
