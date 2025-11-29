@@ -548,30 +548,3 @@ If you use this code in your research, please cite:
   note = {CS/ECE 5510 Multiprocessor Programming Final Project}
 }
 ```
-
----
-
-## License
-
-This project is submitted as academic coursework for CS/ECE 5510 at Virginia Tech. Code is provided for educational purposes.
-
----
-
-## Acknowledgments
-
-- **Professor [Name]** - Course instructor
-- **Virginia Tech ARC** - High-performance computing resources
-- **OpenMP Community** - Parallel programming framework
-- **Research Community** - Skip list and lock-free algorithm pioneers
-
----
-
-## Contact
-
-**Shrikar [Last Name]**  
-Virginia Tech  
-Email: [your email]  
-Course: CS/ECE 5510 - Multiprocessor Programming  
-Semester: Fall 2024
-
-For questions about this implementation or to report issues, please contact via email.
