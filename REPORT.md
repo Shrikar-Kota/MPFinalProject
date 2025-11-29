@@ -1,6 +1,6 @@
 # Lock-Free Skip List: Design, Implementation, and Performance Analysis
 
-**Author:** Shrikar Reddy Kota | Rohit Kumar Salla    
+**Author:** Shrikar Reddy Kota | Rohit Kumar Salla   
 **Course:** CS/ECE 5510 - Multiprocessor Programming  
 **Date:** November 2025
 
@@ -275,11 +275,30 @@ Virginia Tech ARC cluster:
 
 - **Throughput:** Total operations per second
 - **Speedup:** T₁/Tₙ (relative to single thread)
-- **Success rate:** Percentage of operations succeeding (insert uniqueness constraint)
+- **Success/Failed Operations:** For correctness validation, not error counts
+  - Insert: Success = new key inserted, Failed = duplicate key (correct behavior)
+  - Delete: Success = key removed, Failed = key not found (correct behavior)
+  - Contains: Success = key found, Failed = key not found (correct behavior)
+  - Mixed workload shows ~50% success rate due to random key distribution—this reflects natural behavior where duplicate inserts and searches for non-existent keys correctly return false
+
+**Note:** "Failed" operations are not errors but correct responses to duplicates or non-existent keys. All operations contribute to throughput measurements.
 
 ---
 
 ## 5. Results
+
+### 5.0 Figure Organization
+
+The report includes five figures that visualize experimental results:
+
+**Figure Mapping:**
+- **Figure 1 (figure1_scalability.png):** Experiment 1 data - Throughput vs thread count for mixed workload
+- **Figure 2 (figure2_speedup.png):** Derived from Experiment 1 - Speedup relative to single-threaded baseline
+- **Figure 3 (figure3_workload.png):** Experiment 2 data - Performance across insert/readonly/mixed/delete at 8 threads
+- **Figure 4 (figure4_contention.png):** Experiment 3 data - Performance at 16 threads with varying key ranges (1K-1M)
+- **Figure 5 (figure5_comparison.png):** Summary visualization - Peak performance at 32 threads
+
+All figures are generated from `results/results_TIMESTAMP.csv` using `scripts/plot_results.py`. The complete dataset contains 42 experimental configurations across three implementations.
 
 ### 5.1 Scalability Analysis
 
@@ -294,7 +313,9 @@ Virginia Tech ARC cluster:
 | 16 | 0.46 | 6.25 | **6.80** | **14.8×** |
 | 32 | 0.28 | 6.12 | **7.86** | **28.1×** |
 
-![Figure 1: Scalability Analysis](./results/plots/scalability.png)
+*Note: Mixed workload comprises 50% insert, 25% delete, 25% contains operations with random keys from range [0, 100K). The ~50% success rate (successful operations / total operations) reflects natural key distribution where duplicate inserts and searches for non-existent keys correctly return false. All operations (both successful and failed) contribute to throughput measurements.*
+
+![Figure 1: Scalability Analysis](./figures/figure1_scalability.png)
 
 *Figure 1: Throughput vs thread count. Lock-free demonstrates superior scaling, achieving 7.86M ops/sec at 32 threads—28× faster than coarse-grained.*
 
@@ -302,7 +323,7 @@ Virginia Tech ARC cluster:
 
 ### 5.2 Speedup Analysis
 
-![Figure 2: Speedup vs Thread Count](./results/plots/speedup.png)
+![Figure 2: Speedup vs Thread Count](./figures/figure2_speedup.png)
 
 *Figure 2: Speedup relative to single-threaded performance. Lock-free achieves 9.4× speedup at 32 threads, approaching ideal linear scaling.*
 
@@ -319,7 +340,7 @@ Lock-free demonstrates best scalability (9.4× at 32 threads), while coarse-grai
 | Mixed | 0.64 | 3.42 | **4.12** | **Lock-Free** |
 | Delete | 1.85 | **37.8** | 29.8 | Fine |
 
-![Figure 3: Performance Across Workloads](./results/plots/workload_comparison.png)
+![Figure 3: Performance Across Workloads](./figures/figure3_workload.png)
 
 *Figure 3: Workload sensitivity at 8 threads. Lock-free excels at mixed workloads (20% faster than fine-grained), while fine-grained dominates delete-heavy scenarios.*
 
@@ -336,7 +357,7 @@ Lock-free demonstrates best scalability (9.4× at 32 threads), while coarse-grai
 | 100,000 | Medium | 0.49M | 6.46M | 6.59M | 1.02× |
 | 1,000,000 | Low | 0.31M | 3.48M | **4.04M** | 1.16× |
 
-![Figure 4: Performance Under Contention](./results/plots/contention.png)
+![Figure 4: Performance Under Contention](./figures/figure4_contention.png)
 
 *Figure 4: Throughput at varying contention levels (16 threads). At extreme contention (key_range=1000), lock-free achieves 9.18M ops/sec—6× faster than fine-grained.*
 
