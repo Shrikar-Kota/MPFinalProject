@@ -294,7 +294,7 @@ Virginia Tech ARC cluster:
 | 16 | 0.46 | 6.25 | **6.80** | **14.8×** |
 | 32 | 0.28 | 6.12 | **7.86** | **28.1×** |
 
-![Figure 1: Scalability Analysis](./figures/figure1_scalability.png)
+![Figure 1: Scalability Analysis](./results/plots/scalability.png)
 
 *Figure 1: Throughput vs thread count. Lock-free demonstrates superior scaling, achieving 7.86M ops/sec at 32 threads—28× faster than coarse-grained.*
 
@@ -302,7 +302,7 @@ Virginia Tech ARC cluster:
 
 ### 5.2 Speedup Analysis
 
-![Figure 2: Speedup vs Thread Count](./figures/figure2_speedup.png)
+![Figure 2: Speedup vs Thread Count](./results/plots/speedup.png)
 
 *Figure 2: Speedup relative to single-threaded performance. Lock-free achieves 9.4× speedup at 32 threads, approaching ideal linear scaling.*
 
@@ -319,7 +319,7 @@ Lock-free demonstrates best scalability (9.4× at 32 threads), while coarse-grai
 | Mixed | 0.64 | 3.42 | **4.12** | **Lock-Free** |
 | Delete | 1.85 | **37.8** | 29.8 | Fine |
 
-![Figure 3: Performance Across Workloads](./figures/figure3_workload.png)
+![Figure 3: Performance Across Workloads](./results/plots/workload_comparison.png)
 
 *Figure 3: Workload sensitivity at 8 threads. Lock-free excels at mixed workloads (20% faster than fine-grained), while fine-grained dominates delete-heavy scenarios.*
 
@@ -336,7 +336,7 @@ Lock-free demonstrates best scalability (9.4× at 32 threads), while coarse-grai
 | 100,000 | Medium | 0.49M | 6.46M | 6.59M | 1.02× |
 | 1,000,000 | Low | 0.31M | 3.48M | **4.04M** | 1.16× |
 
-![Figure 4: Performance Under Contention](./figures/figure4_contention.png)
+![Figure 4: Performance Under Contention](./results/plots/contention.png)
 
 *Figure 4: Throughput at varying contention levels (16 threads). At extreme contention (key_range=1000), lock-free achieves 9.18M ops/sec—6× faster than fine-grained.*
 
