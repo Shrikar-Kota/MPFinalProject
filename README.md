@@ -532,19 +532,3 @@ python3 scripts/plot_results.py results/results_20241129_040718.csv
 6. **Fraser, K., & Harris, T. (2007).** "Concurrent programming without locks." *ACM Transactions on Computer Systems*, 25(2), Article 5.
 
 7. **Linden, J., & Jonsson, B. (2013).** "A skiplist-based concurrent priority queue with minimal memory contention." *International Conference on Principles of Distributed Systems*, 206-220.
-
----
-
-## Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@techreport{skiplist2024,
-  author = {[Your Name]},
-  title = {Lock-Free Skip List: Design, Implementation, and Performance Analysis},
-  institution = {Virginia Tech},
-  year = {2024},
-  note = {CS/ECE 5510 Multiprocessor Programming Final Project}
-}
-```
