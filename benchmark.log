@@ -3,148 +3,148 @@ nohup: ignoring input
 Comprehensive Benchmark Suite
 =========================================
 NO TIMEOUT - Will run until complete
-Started at: Fri Nov 28 12:58:08 AM EST 2025
+Started at: Sun Dec  7 08:14:21 PM EST 2025
 
 
 === Experiment 1: Scalability (18 runs) ===
 Progress: [1/18]
-[00:58:08] Running: impl=coarse threads=1 workload=mixed
+[20:14:21] Running: impl=coarse threads=1 workload=mixed
   ✓ Done in 1s
 Progress: [2/18]
-[00:58:09] Running: impl=coarse threads=2 workload=mixed
-  ✓ Done in 3s
+[20:14:22] Running: impl=coarse threads=2 workload=mixed
+  ✓ Done in 2s
 Progress: [3/18]
-[00:58:12] Running: impl=coarse threads=4 workload=mixed
-  ✓ Done in 6s
+[20:14:24] Running: impl=coarse threads=4 workload=mixed
+  ✓ Done in 4s
 Progress: [4/18]
-[00:58:18] Running: impl=coarse threads=8 workload=mixed
+[20:14:28] Running: impl=coarse threads=8 workload=mixed
   ✓ Done in 14s
 Progress: [5/18]
-[00:58:32] Running: impl=coarse threads=16 workload=mixed
-  ✓ Done in 35s
+[20:14:42] Running: impl=coarse threads=16 workload=mixed
+  ✓ Done in 39s
 Progress: [6/18]
-[00:59:07] Running: impl=coarse threads=32 workload=mixed
-  ✓ Done in 114s
+[20:15:21] Running: impl=coarse threads=32 workload=mixed
+  ✓ Done in 111s
 Progress: [7/18]
-[01:01:01] Running: impl=fine threads=1 workload=mixed
+[20:17:12] Running: impl=fine threads=1 workload=mixed
   ✓ Done in 1s
 Progress: [8/18]
-[01:01:02] Running: impl=fine threads=2 workload=mixed
-  ✓ Done in 2s
+[20:17:13] Running: impl=fine threads=2 workload=mixed
+  ✓ Done in 1s
 Progress: [9/18]
-[01:01:04] Running: impl=fine threads=4 workload=mixed
-  ✓ Done in 2s
+[20:17:14] Running: impl=fine threads=4 workload=mixed
+  ✓ Done in 1s
 Progress: [10/18]
-[01:01:06] Running: impl=fine threads=8 workload=mixed
-  ✓ Done in 3s
+[20:17:15] Running: impl=fine threads=8 workload=mixed
+  ✓ Done in 1s
 Progress: [11/18]
-[01:01:09] Running: impl=fine threads=16 workload=mixed
-  ✓ Done in 2s
+[20:17:16] Running: impl=fine threads=16 workload=mixed
+  ✓ Done in 3s
 Progress: [12/18]
-[01:01:12] Running: impl=fine threads=32 workload=mixed
-  ✓ Done in 6s
+[20:17:19] Running: impl=fine threads=32 workload=mixed
+  ✓ Done in 4s
 Progress: [13/18]
-[01:01:17] Running: impl=lockfree threads=1 workload=mixed
+[20:17:23] Running: impl=lockfree threads=1 workload=mixed
   ✓ Done in 1s
 Progress: [14/18]
-[01:01:18] Running: impl=lockfree threads=2 workload=mixed
-  ✓ Done in 2s
+[20:17:24] Running: impl=lockfree threads=2 workload=mixed
+  ✓ Done in 1s
 Progress: [15/18]
-[01:01:20] Running: impl=lockfree threads=4 workload=mixed
+[20:17:25] Running: impl=lockfree threads=4 workload=mixed
   ✓ Done in 2s
 Progress: [16/18]
-[01:01:22] Running: impl=lockfree threads=8 workload=mixed
+[20:17:27] Running: impl=lockfree threads=8 workload=mixed
   ✓ Done in 2s
 Progress: [17/18]
-[01:01:24] Running: impl=lockfree threads=16 workload=mixed
-  ✓ Done in 2s
+[20:17:29] Running: impl=lockfree threads=16 workload=mixed
+  ✓ Done in 1s
 Progress: [18/18]
-[01:01:26] Running: impl=lockfree threads=32 workload=mixed
-  ✓ Done in 4s
+[20:17:30] Running: impl=lockfree threads=32 workload=mixed
+  ✓ Done in 5s
 
 === Experiment 2: Workload Comparison (12 runs) ===
 Progress: [1/12]
-[01:01:30] Running: impl=coarse threads=8 workload=insert
-  ✓ Done in 13s
+[20:17:35] Running: impl=coarse threads=8 workload=insert
+  ✓ Done in 8s
 Progress: [2/12]
-[01:01:44] Running: impl=coarse threads=8 workload=readonly
-  ✓ Done in 13s
+[20:17:43] Running: impl=coarse threads=8 workload=readonly
+  ✓ Done in 8s
 Progress: [3/12]
-[01:01:56] Running: impl=coarse threads=8 workload=mixed
-  ✓ Done in 12s
+[20:17:51] Running: impl=coarse threads=8 workload=mixed
+  ✓ Done in 9s
 Progress: [4/12]
-[01:02:08] Running: impl=coarse threads=8 workload=delete
-  ✓ Done in 5s
+[20:18:00] Running: impl=coarse threads=8 workload=delete
+  ✓ Done in 4s
 Progress: [5/12]
-[01:02:13] Running: impl=fine threads=8 workload=insert
+[20:18:04] Running: impl=fine threads=8 workload=insert
   ✓ Done in 1s
 Progress: [6/12]
-[01:02:14] Running: impl=fine threads=8 workload=readonly
-  ✓ Done in 2s
+[20:18:05] Running: impl=fine threads=8 workload=readonly
+  ✓ Done in 1s
 Progress: [7/12]
-[01:02:16] Running: impl=fine threads=8 workload=mixed
+[20:18:06] Running: impl=fine threads=8 workload=mixed
   ✓ Done in 2s
 Progress: [8/12]
-[01:02:18] Running: impl=fine threads=8 workload=delete
-  ✓ Done in 1s
+[20:18:08] Running: impl=fine threads=8 workload=delete
+  ✓ Done in 0s
 Progress: [9/12]
-[01:02:19] Running: impl=lockfree threads=8 workload=insert
+[20:18:08] Running: impl=lockfree threads=8 workload=insert
   ✓ Done in 1s
 Progress: [10/12]
-[01:02:20] Running: impl=lockfree threads=8 workload=readonly
-  ✓ Done in 2s
+[20:18:09] Running: impl=lockfree threads=8 workload=readonly
+  ✓ Done in 1s
 Progress: [11/12]
-[01:02:22] Running: impl=lockfree threads=8 workload=mixed
+[20:18:10] Running: impl=lockfree threads=8 workload=mixed
   ✓ Done in 2s
 Progress: [12/12]
-[01:02:24] Running: impl=lockfree threads=8 workload=delete
+[20:18:12] Running: impl=lockfree threads=8 workload=delete
   ✓ Done in 0s
 
 === Experiment 3: Contention Study (12 runs) ===
 Progress: [1/12]
-[01:02:24] Running: impl=coarse threads=16 workload=mixed
-  ✓ Done in 26s
-Progress: [2/12]
-[01:02:50] Running: impl=coarse threads=16 workload=mixed
+[20:18:12] Running: impl=coarse threads=16 workload=mixed
   ✓ Done in 28s
+Progress: [2/12]
+[20:18:40] Running: impl=coarse threads=16 workload=mixed
+  ✓ Done in 22s
 Progress: [3/12]
-[01:03:18] Running: impl=coarse threads=16 workload=mixed
-  ✓ Done in 33s
+[20:19:02] Running: impl=coarse threads=16 workload=mixed
+  ✓ Done in 36s
 Progress: [4/12]
-[01:03:51] Running: impl=coarse threads=16 workload=mixed
-  ✓ Done in 52s
+[20:19:38] Running: impl=coarse threads=16 workload=mixed
+  ✓ Done in 39s
 Progress: [5/12]
-[01:04:43] Running: impl=fine threads=16 workload=mixed
-  ✓ Done in 11s
+[20:20:17] Running: impl=fine threads=16 workload=mixed
+  ✓ Done in 6s
 Progress: [6/12]
-[01:04:54] Running: impl=fine threads=16 workload=mixed
+[20:20:23] Running: impl=fine threads=16 workload=mixed
   ✓ Done in 4s
 Progress: [7/12]
-[01:04:58] Running: impl=fine threads=16 workload=mixed
-  ✓ Done in 3s
-Progress: [8/12]
-[01:05:01] Running: impl=fine threads=16 workload=mixed
-  ✓ Done in 5s
-Progress: [9/12]
-[01:05:06] Running: impl=lockfree threads=16 workload=mixed
+[20:20:27] Running: impl=fine threads=16 workload=mixed
   ✓ Done in 2s
+Progress: [8/12]
+[20:20:29] Running: impl=fine threads=16 workload=mixed
+  ✓ Done in 4s
+Progress: [9/12]
+[20:20:33] Running: impl=lockfree threads=16 workload=mixed
+  ✓ Done in 1s
 Progress: [10/12]
-[01:05:08] Running: impl=lockfree threads=16 workload=mixed
+[20:20:34] Running: impl=lockfree threads=16 workload=mixed
   ✓ Done in 2s
 Progress: [11/12]
-[01:05:10] Running: impl=lockfree threads=16 workload=mixed
-  ✓ Done in 3s
+[20:20:36] Running: impl=lockfree threads=16 workload=mixed
+  ✓ Done in 2s
 Progress: [12/12]
-[01:05:13] Running: impl=lockfree threads=16 workload=mixed
-  ✓ Done in 4s
+[20:20:38] Running: impl=lockfree threads=16 workload=mixed
+  ✓ Done in 3s
 
 =========================================
 Benchmarks Complete!
 =========================================
-Completed at: Fri Nov 28 01:05:17 AM EST 2025
-Results: results/results_20251128_005808.csv
+Completed at: Sun Dec  7 08:20:41 PM EST 2025
+Results: results/results_20251207_201421.csv
 Total results: 42
 
 To analyze results:
-  python3 scripts/plot_results.py results/results_20251128_005808.csv
+  python3 scripts/plot_results.py results/results_20251207_201421.csv
 
