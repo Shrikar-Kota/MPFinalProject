@@ -236,10 +236,10 @@ bool insert(list, key, value) {
 ```
 
 **Properties:**
-- ✅ Sequential consistency (trivially correct)
-- ✅ Simple implementation (~176 lines)
-- ❌ Zero concurrency (readers block writers)
-- ❌ Negative scaling (0.36× speedup at 32 threads)
+- Sequential consistency (trivially correct)
+- Simple implementation (~176 lines)
+- Zero concurrency (readers block writers)
+- Negative scaling (0.36× speedup at 32 threads)
 
 **Use case:** Baseline for comparison
 
@@ -273,10 +273,10 @@ bool insert(list, key, value) {
 ```
 
 **Properties:**
-- ✅ Lock-free reads (wait-free progress)
-- ✅ Deadlock-free (hand-over-hand locking)
-- ✅ Excellent delete performance (37.8M ops/sec)
-- ⚠️ Optimistic validation overhead under contention
+- Lock-free reads (wait-free progress)
+- Deadlock-free (hand-over-hand locking)
+- Excellent delete performance (37.8M ops/sec)
+- Optimistic validation overhead under contention
 
 **Complexity:** ~280 lines
 
@@ -323,19 +323,19 @@ while (IS_MARKED(curr->next[level])) {
 ```
 
 **Lock-Free Verification:**
-- ✅ No mutual exclusion primitives
-- ✅ CAS-only synchronization
-- ✅ System-wide progress guarantee (every CAS failure = another thread's success)
-- ✅ Mark-before-unlink prevents ABA problem
-- ✅ Bounded retries (100) for livelock prevention
+- No mutual exclusion primitives
+- CAS-only synchronization
+- System-wide progress guarantee (every CAS failure = another thread's success)
+- Mark-before-unlink prevents ABA problem
+- Bounded retries (100) for livelock prevention
 
 **Complexity:** ~200 lines
 
 **Properties:**
-- ✅ True lock-free (formal verification in report)
-- ✅ Wait-free `contains()` operation
-- ✅ Best performance under contention (6× advantage)
-- ⚠️ Not wait-free (individual operations may fail after retries)
+- True lock-free (formal verification in report)
+- Wait-free `contains()` operation
+- Best performance under contention (6× advantage)
+- Not wait-free (individual operations may fail after retries)
 
 ---
 
