@@ -1,6 +1,6 @@
 # Lock-Free Skip List: Design, Implementation, and Performance Analysis
 
-**Author:** Shrikar Redy Kota | Rohit Kumar Salla    
+**Author:** Shrikar Reddy Kota | Rohit Kumar Salla    
 **Course:** CS/ECE 5510 - Multiprocessor Programming  
 **Date:** December 2024
 
