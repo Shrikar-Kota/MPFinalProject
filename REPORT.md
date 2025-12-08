@@ -1,6 +1,6 @@
 # Lock-Free Skip List: Design, Implementation, and Performance Analysis
 
-**Author:** Shrikar Reddy Kota | Rohit Kumar Salla    
+**Author:** Shrikar Redy Kota | Rohit Kumar Salla    
 **Course:** CS/ECE 5510 - Multiprocessor Programming  
 **Date:** November 2024
 
@@ -61,6 +61,8 @@ Safe memory reclamation in lock-free structures is non-trivial. **Epoch-based re
 **Parallelism:** OpenMP (thread management, atomic operations)  
 **Platform:** Virginia Tech ARC cluster (multi-core x86_64)  
 **Build System:** Make with GCC optimization flags (-O3, -fopenmp)
+
+**Synchronization Strategy:** While we utilized OpenMP's parallel regions for thread orchestration and environment management (`#pragma omp parallel`), we employed C11 `<stdatomic.h>` primitives for the lock-free synchronization. This choice was necessary because the Harris algorithm requires bitwise pointer manipulation (marking) combined with CAS, which exceeds the capabilities of standard OpenMP atomic directives. OpenMP provides `#pragma omp atomic` for simple operations, but lacks support for the marked pointer technique essential to lock-free linked structures. C11 atomics provide `atomic_compare_exchange_strong` with full control over memory ordering and pointer manipulation, enabling the mark-before-unlink deletion pattern.
 
 **Data Structure:**
 ```c
@@ -421,7 +423,12 @@ Fraser (2004) noted that lock-free structures can underperform at low thread cou
 
 **1. Wait-Free Progress:** While our implementation is lock-free (system progress guaranteed), it is not wait-free (individual operations may fail after bounded retries). This is acceptable as most practical "lock-free" data structures make the same trade-off.
 
-**2. Memory Reclamation:** Deleted nodes are not freed (memory leak in long-running scenarios). Production systems require epoch-based reclamation or hazard pointers.
+**2. Memory Reclamation:** To ensure memory safety without the implementation complexity of hazard pointers or epoch-based reclamation (which would exceed the project scope), we utilize deferred reclamation: nodes are logically and physically unlinked immediately, but memory is freed only at program termination. This design choice prevents use-after-free errors that could occur if a node is freed while another thread still holds a reference to it. Production systems require proper memory reclamation techniques such as:
+- **Epoch-based reclamation** (Fraser, 2004): Threads announce epochs, nodes freed when all threads advance
+- **Hazard pointers** (Michael, 2004): Threads mark pointers they're accessing, preventing premature deallocation
+- **Reference counting**: Atomic counters track node usage
+
+For benchmark workloads (finite duration, bounded memory), deferred reclamation is acceptable and simplifies the implementation while maintaining correctness.
 
 **3. Workload Coverage:** Experiments focus on uniform random access. Real-world workloads often exhibit skew (hotspot keys) which may affect relative performance.
 
