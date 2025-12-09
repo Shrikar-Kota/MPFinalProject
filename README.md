@@ -54,7 +54,7 @@ MPFinalProject/
 ├── Makefile                     # Build system
 ├── README.md                    # This file
 └── REPORT.md    # Comprehensive 5-page analysis report (MD File)
-|__ REPORT.pdf   # Comprehensive 5-page analysis report (PDF File)
+└── REPORT.pdf   # Comprehensive 5-page analysis report (PDF File)
 ```
 
 ---
