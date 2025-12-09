@@ -6,7 +6,7 @@ A comprehensive implementation and performance analysis of three concurrent skip
 Shrikar Reddy Kota | Rohit Kumar Salla  
 CS/ECE 5510 - Multiprocessor Programming  
 Virginia Tech  
-November 2024
+November 2025
 
 ---
 
