@@ -48,7 +48,7 @@ MPFinalProject/
 │   ├── figure1_scalability.png
 │   ├── figure2_speedup.png
 │   ├── figure3_workload.png
-│   ├── figure4_contention.png   # ⭐ Shows 4.3× breakthrough
+│   ├── figure4_contention.png   # Shows 4.3× breakthrough
 │   └── figure5_comparison.png
 ├── results/
 │   └── results_TIMESTAMP.csv   # Experimental data (42 configurations)
