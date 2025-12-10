@@ -54,7 +54,7 @@ MPFinalProject/
 │   └── results_TIMESTAMP.csv   # Experimental data (42 configurations)
 ├── Makefile                     # Build system
 ├── README.md                    # This file
-└── FINAL_PROJECT_REPORT.pdf    # Comprehensive 5-page analysis report
+└── REPORT.pdf    # Comprehensive 5-page analysis report
 ```
 
 ---
