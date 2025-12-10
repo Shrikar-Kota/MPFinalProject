@@ -1,6 +1,6 @@
 # Lock-Free Skip List: Concurrent Data Structure Implementation
 
-A comprehensive implementation and performance analysis of three concurrent skip list variants with different synchronization strategies, achieving 28× speedup over coarse-grained locking and 6× advantage under extreme contention.
+A comprehensive implementation and performance analysis of three concurrent skip list variants with different synchronization strategies, achieving **27× speedup** over coarse-grained locking and **4.3× advantage** under extreme contention.
 
 ## Author
 Shrikar Reddy Kota | Rohit Kumar Salla  
@@ -20,8 +20,9 @@ This project implements and evaluates three concurrent skip list variants:
 
 ### Key Achievements
 
-- **28× speedup** over coarse-grained at 32 threads (7.86M vs 0.28M ops/sec)
-- **6× throughput advantage** under extreme contention (9.18M vs 1.54M ops/sec)
+- **27× speedup** over coarse-grained at 32 threads
+- **4.3× throughput advantage** under extreme contention through novel local recovery optimization
+- **Peak performance** of 9.45M ops/sec at 16 threads
 - **True lock-free implementation** with formal verification of progress guarantees
 - **Novel local recovery optimization** preventing restart cascades on CAS failures
 
@@ -47,14 +48,13 @@ MPFinalProject/
 │   ├── figure1_scalability.png
 │   ├── figure2_speedup.png
 │   ├── figure3_workload.png
-│   ├── figure4_contention.png
+│   ├── figure4_contention.png   # ⭐ Shows 4.3× breakthrough
 │   └── figure5_comparison.png
 ├── results/
 │   └── results_TIMESTAMP.csv   # Experimental data (42 configurations)
 ├── Makefile                     # Build system
 ├── README.md                    # This file
-└── REPORT.md    # Comprehensive 5-page analysis report (MD File)
-└── REPORT.pdf   # Comprehensive 5-page analysis report (PDF File)
+└── FINAL_PROJECT_REPORT.pdf    # Comprehensive 5-page analysis report
 ```
 
 ---
@@ -123,28 +123,37 @@ All 12 tests PASSED ✓
 ### Run Single Benchmark
 
 ```bash
-./bin/benchmark --impl [coarse|fine|lockfree] \
-                --threads <num_threads> \
-                --ops <operations_per_thread> \
-                --key-range <key_space_size> \
-                --workload [insert|readonly|mixed|delete] \
-                [--csv]
+./bin/benchmark <impl> <threads> <workload> <ops> <key_range>
 ```
+
+**Parameters:**
+- `impl`: Implementation type (`coarse`, `fine`, `lockfree`)
+- `threads`: Number of parallel threads (1-32)
+- `workload`: Workload type (`insert`, `readonly`, `mixed`, `delete`)
+- `ops`: Total operations to perform (e.g., 8000000)
+- `key_range`: Size of key space [0, N) (e.g., 100000)
 
 **Example - Lock-free with 16 threads:**
 ```bash
-./bin/benchmark --impl lockfree \
-                --threads 16 \
-                --ops 1000000 \
-                --key-range 100000 \
-                --workload mixed \
-                --csv
+./bin/benchmark lockfree 16 mixed 16000000 100000
 ```
 
 **Example output:**
 ```
-impl,threads,workload,ops,key_range,time,throughput,successful,failed
-lockfree,16,mixed,16000000,100000,2.3520,6802775.89,8594953,7405047
+Implementation: lockfree
+Threads: 16
+Workload: mixed
+Operations: 16000000
+Key Range: 100000
+Time: 1.69 seconds
+Throughput: 9.45M ops/sec
+Successful: 8592473
+Failed: 7407527
+```
+
+**Example - Test extreme contention scenario:**
+```bash
+./bin/benchmark lockfree 16 mixed 16000000 1000
 ```
 
 ### Run Complete Experimental Suite
@@ -155,8 +164,18 @@ lockfree,16,mixed,16000000,100000,2.3520,6802775.89,8594953,7405047
 
 **This runs 42 benchmark configurations:**
 - **Experiment 1:** Scalability (6 thread counts × 3 implementations = 18 runs)
+  - Threads: 1, 2, 4, 8, 16, 32
+  - Workload: Mixed (50% insert, 25% delete, 25% contains)
+  - Key range: 100,000
+  
 - **Experiment 2:** Workload sensitivity (4 workloads × 3 implementations = 12 runs)
-- **Experiment 3:** Contention study (4 key ranges × 3 implementations = 12 runs)
+  - Fixed: 8 threads, 100,000 key range
+  - Workloads: Insert-only, Read-only, Mixed, Delete-heavy
+  
+- **Experiment 3:** Contention study (4 key ranges × 3 implementations = 12 runs) ⭐
+  - Fixed: 16 threads, Mixed workload
+  - Key ranges: 1,000 (extreme), 10,000 (high), 100,000 (medium), 1,000,000 (low)
+  - This reveals the **4.3× breakthrough result**
 
 **Runtime:** ~30-60 minutes (depending on hardware)
 
@@ -169,55 +188,71 @@ python3 scripts/plot_results.py results/results_TIMESTAMP.csv
 ```
 
 **Output:** 5 figures in `figures/` directory:
-- `figure1_scalability.png` - Throughput vs thread count (mixed workload)
+- `figure1_scalability.png` - Throughput vs thread count 
 - `figure2_speedup.png` - Speedup relative to single-threaded baseline
-- `figure3_workload.png` - Performance across insert/readonly/mixed/delete workloads
-- `figure4_contention.png` - Performance under varying contention levels (★ 6× result)
-- `figure5_comparison.png` - Peak performance comparison bar chart
+- `figure3_workload.png` - Performance across workload types
+- `figure4_contention.png` - **Contention study showing lock-free advantage**
+- `figure5_comparison.png` - Peak performance comparison
 
 All figures are 300 DPI, publication-ready with annotations.
 
 ---
 
-## Benchmark Parameters
+## Understanding the Results
 
-### Command-Line Options
+### Success vs Failed Operations
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `--impl` | Implementation type: coarse, fine, lockfree | lockfree |
-| `--threads` | Number of parallel threads | 4 |
-| `--ops` | Operations per thread | 100,000 |
-| `--key-range` | Size of key space [0, N) | 10,000 |
-| `--workload` | Workload type (see below) | mixed |
-| `--initial-size` | Pre-populate list with N elements | 0 |
-| `--warmup` | Warmup operations before timing | 1,000 |
-| `--insert-pct` | Insert percentage (mixed only) | 30 |
-| `--delete-pct` | Delete percentage (mixed only) | 20 |
-| `--csv` | Output in CSV format | (off) |
+**Important:** "Failed" operations are **not errors** but correct behavior:
 
-### Workload Types
+- **Insert:** 
+  - Success = new key inserted
+  - Failed = duplicate key already exists (correct rejection)
+  
+- **Delete:** 
+  - Success = key found and removed
+  - Failed = key not in list (correct behavior)
+  
+- **Contains:** 
+  - Success = key found
+  - Failed = key not in list (correct behavior)
+
+**Mixed workload** shows ~50% success rate because:
+- Random keys from range [0, 100K)
+- Duplicate inserts correctly return false
+- Searches for non-existent keys correctly return false
+- **All operations (successful + failed) contribute to throughput**
+
+### Why Lock-Free Wins Under Contention
+
+**Traditional lock-free skip lists** restart from head on every CAS failure:
+```
+1. Start at head
+2. Traverse O(log n) levels to find position
+3. CAS fails → RESTART FROM HEAD  ← O(n) wasted work!
+4. Repeat...
+```
+
+**Our local recovery optimization:**
+```
+1. Start at head
+2. Traverse O(log n) levels to find position
+3. CAS fails → Check if predecessor still valid
+4. If valid: Retry locally (O(1) work)  ← Game changer!
+5. If deleted: Restart from head (rare)
+```
+
+**Result:** At extreme contention (16 threads, 1000 keys), this optimization provides **4.3× speedup** (12.8M vs 2.94M ops/sec) by converting expensive O(n) restarts into cheap O(1) local retries.
+
+---
+
+## Workload Types
 
 | Workload | Composition | Use Case |
 |----------|-------------|----------|
 | `insert` | 100% insert | Write-heavy stress test |
 | `readonly` | 100% contains | Read-only scalability |
 | `mixed` | 50% insert, 25% delete, 25% contains | Realistic concurrent usage |
-| `delete` | 100% delete | Requires `--initial-size` |
-
-**Note:** Mixed workload shows ~50% success rate due to random keys—duplicates and non-existent keys correctly return false.
-
-### Example Custom Configuration
-
-```bash
-# High contention test (16 threads, small key space)
-./bin/benchmark --impl lockfree \
-                --threads 16 \
-                --ops 1000000 \
-                --key-range 1000 \
-                --workload mixed \
-                --csv
-```
+| `delete` | 100% delete | Requires pre-population |
 
 ---
 
@@ -245,8 +280,8 @@ for i in {1..10}; do
     make test || break
 done
 
-# Enable verbose output
-./bin/correctness_test 2>&1 | tee test_output.log
+# If tests fail, check implementation correctness
+./bin/correctness_test
 ```
 
 ### Benchmark Issues
@@ -255,16 +290,25 @@ done
 ```bash
 # Increase stack size (skip lists can be tall)
 ulimit -s unlimited
-./bin/benchmark --impl lockfree --threads 32
+./bin/benchmark lockfree 32 mixed 32000000 100000
 ```
 
-**Problem:** Low throughput
+**Problem:** Low throughput compared to reported results
 ```bash
 # Disable CPU frequency scaling
 sudo cpupower frequency-set -g performance
 
-# Pin to physical cores
-OMP_PROC_BIND=true ./bin/benchmark --impl lockfree --threads 16
+# Pin threads to physical cores
+export OMP_PROC_BIND=true
+./bin/benchmark lockfree 16 mixed 16000000 100000
+```
+
+**Problem:** High variance in results
+```bash
+# Run multiple times and average
+for i in {1..5}; do
+    ./bin/benchmark lockfree 16 mixed 16000000 100000
+done
 ```
 
 ### Plotting Issues
@@ -276,48 +320,12 @@ pip3 install --user pandas matplotlib seaborn
 # Verify CSV format
 head -5 results/results_*.csv
 
+# Should show:
+# impl,threads,workload,ops,key_range,time,throughput,successful,failed
+# lockfree,16,mixed,16000000,100000,1.6934,9448433.51,...
+
 # Test plotting
-python3 scripts/plot_results.py results/results_20241129_040718.csv
-```
-
----
-
-## Development
-
-### Code Organization
-
-- **Shared definitions:** `skiplist_common.h` (data structures, macros)
-- **Marked pointer macros:** `IS_MARKED()`, `GET_UNMARKED()`, `GET_MARKED()`
-- **Atomic operations:** C11 `<stdatomic.h>` with sequential consistency
-- **Random level generation:** Thread-local seeds with nanosecond precision
-
-### Adding New Implementations
-
-1. Create `skiplist_yourname.c`
-2. Implement interface from `skiplist_common.h`:
-   ```c
-   SkipList* skiplist_create_yourname(void);
-   bool skiplist_insert_yourname(SkipList*, int, int);
-   bool skiplist_delete_yourname(SkipList*, int);
-   bool skiplist_contains_yourname(SkipList*, int);
-   void skiplist_destroy_yourname(SkipList*);
-   ```
-3. Add to `benchmark.c` and `correctness_test.c`
-4. Update `Makefile`
-
-### Performance Tuning
-
-**Lock-free parameters** (in `skiplist_lockfree.c`):
-```c
-#define YIELD_THRESHOLD 3        // Yield after N CAS failures
-#define MAX_RETRIES 100          // Abort after N attempts
-#define BACKOFF_MAX_SPINS 4096   // Exponential backoff ceiling
-```
-
-**Skip list parameters** (in `skiplist_common.h`):
-```c
-#define MAX_LEVEL 16    // Maximum skip list height
-#define P_FACTOR 0.5    // Level promotion probability
+python3 scripts/plot_results.py results/results_*.csv
 ```
 
 ---
@@ -328,7 +336,9 @@ python3 scripts/plot_results.py results/results_20241129_040718.csv
 
 - **C11 atomics** with sequential consistency
 - **Memory ordering:** Total ordering across all threads
-- **No memory reclamation:** Deleted nodes leaked (acceptable for benchmarks)
+- **No memory reclamation:** Deleted nodes leaked (acceptable for finite benchmarks)
+  - Production systems would use epoch-based reclamation or hazard pointers
+  - For benchmark workloads (finite duration), memory growth is bounded
 
 ### Linearization Points
 
@@ -343,25 +353,7 @@ python3 scripts/plot_results.py results/results_20241129_040718.csv
 | Implementation | Contains | Insert/Delete |
 |----------------|----------|---------------|
 | Coarse-Grained | Blocking | Blocking |
-| Fine-Grained | Wait-free | Lock-free |
-| Lock-Free | Wait-free | Lock-free |
+| Fine-Grained | Wait-free | Lock-free (optimistic) |
+| Lock-Free | Wait-free | Lock-free (CAS-based) |
 
-**Lock-free definition:** At least one thread makes progress in finite steps (system-wide progress, not per-thread).
-
----
-
-## References
-
-1. **Pugh, W. (1990).** "Skip lists: a probabilistic alternative to balanced trees." *Communications of the ACM*, 33(6), 668-676.
-
-2. **Harris, T. L. (2001).** "A pragmatic implementation of non-blocking linked-lists." *International Symposium on Distributed Computing* (DISC), 300-314.
-
-3. **Fraser, K. (2004).** "Practical lock freedom." *PhD Thesis*, University of Cambridge.
-
-4. **Michael, M. M. (2004).** "Hazard pointers: Safe memory reclamation for lock-free objects." *IEEE Transactions on Parallel and Distributed Systems*, 15(6), 491-504.
-
-5. **Herlihy, M., & Shavit, N. (2008).** *The Art of Multiprocessor Programming*. Morgan Kaufmann.
-
-6. **Fraser, K., & Harris, T. (2007).** "Concurrent programming without locks." *ACM Transactions on Computer Systems*, 25(2), Article 5.
-
-7. **Linden, J., & Jonsson, B. (2013).** "A skiplist-based concurrent priority queue with minimal memory contention." *International Conference on Principles of Distributed Systems*, 206-220.
+**Lock-free definition:** At least one thread makes progress in finite steps (system-wide progress, not per-thread). Each CAS failure indicates another thread's success
